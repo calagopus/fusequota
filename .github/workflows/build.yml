@@ -27,18 +27,11 @@ jobs:
         with:
           submodules: recursive
 
-      - name: Install dependencies (Native)
-        if: matrix.arch == 'x86_64'
-        run: |
-          sudo apt-get update -q -y
-          sudo apt-get install -q -y \
-            build-essential cmake ninja-build meson pkg-config libfuse3-dev fuse3 git
-
       - name: Build (Native x86_64)
         if: matrix.arch == 'x86_64'          
         run: |
-          apt-get update -q -y
-          apt-get install -q -y \
+          sudo apt-get update -q -y
+          sudo apt-get install -q -y \
             build-essential \
             gcc-14 g++-14 \
             cmake ninja-build meson pkg-config fuse3 git
