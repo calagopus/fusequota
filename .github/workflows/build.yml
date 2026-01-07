@@ -35,11 +35,18 @@ jobs:
             build-essential cmake ninja-build meson pkg-config libfuse3-dev fuse3 git
 
       - name: Build (Native x86_64)
-        if: matrix.arch == 'x86_64'
+        if: matrix.arch == 'x86_64'          
         run: |
-          if [ ! -d "external/libfuse/build" ]; then
-            meson setup external/libfuse external/libfuse/build
-          fi
+          apt-get update -q -y
+          apt-get install -q -y \
+            build-essential \
+            gcc-14 g++-14 \
+            cmake ninja-build meson pkg-config fuse3 git
+
+          export CC=gcc-14
+          export CXX=g++-14
+          
+          echo "Building fusequota for ${{ matrix.arch }}"
           make all
 
       - name: Build on ${{ matrix.arch }} (Emulated)
@@ -52,11 +59,11 @@ jobs:
           install: |
             apt-get update -q -y
             apt-get install -q -y \
-              build-essential cmake ninja-build meson pkg-config libfuse3-dev fuse3 git
+              build-essential \
+              gcc-14 g++-14 \
+              cmake ninja-build meson pkg-config fuse3 git
           run: |
-            if [ ! -d "external/libfuse/build" ]; then
-              meson setup external/libfuse external/libfuse/build
-            fi
+            echo "Building fusequota for ${{ matrix.arch }}"
             make all
 
       - name: Upload artifact
