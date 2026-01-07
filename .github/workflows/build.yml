@@ -7,22 +7,18 @@ on:
 
 jobs:
   build:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     strategy:
       fail-fast: false
       matrix:
         include:
           - arch: x86_64
-            distro: ubuntu22.04
             artifact_name: fusequota-x86_64-linux
           - arch: aarch64
-            distro: ubuntu22.04
             artifact_name: fusequota-aarch64-linux
           - arch: riscv64
-            distro: ubuntu22.04
             artifact_name: fusequota-riscv64-linux
           - arch: ppc64le
-            distro: ubuntu22.04
             artifact_name: fusequota-ppc64le-linux
 
     steps:
@@ -31,37 +27,36 @@ jobs:
         with:
           submodules: recursive
 
-      - name: Build on ${{ matrix.arch }}
+      - name: Install dependencies (Native)
+        if: matrix.arch == 'x86_64'
+        run: |
+          sudo apt-get update -q -y
+          sudo apt-get install -q -y \
+            build-essential cmake ninja-build meson pkg-config libfuse3-dev fuse3 git
+
+      - name: Build (Native x86_64)
+        if: matrix.arch == 'x86_64'
+        run: |
+          if [ ! -d "external/libfuse/build" ]; then
+            meson setup external/libfuse external/libfuse/build
+          fi
+          make all
+
+      - name: Build on ${{ matrix.arch }} (Emulated)
+        if: matrix.arch != 'x86_64'
         uses: uraimo/run-on-arch-action@v2
-        id: build
         with:
           arch: ${{ matrix.arch }}
-          distro: ${{ matrix.distro }}
-
+          distro: ubuntu24.04
           githubToken: ${{ github.token }}
-
           install: |
             apt-get update -q -y
             apt-get install -q -y \
-              build-essential \
-              cmake \
-              ninja-build \
-              meson \
-              pkg-config \
-              libfuse3-dev \
-              fuse3 \
-              python3-pip \
-              git
-
+              build-essential cmake ninja-build meson pkg-config libfuse3-dev fuse3 git
           run: |
-            echo "Building fusequota for ${{ matrix.arch }}"
-
-            # Build libfuse from external submodule
-            echo "--- Building libfuse ---"
             if [ ! -d "external/libfuse/build" ]; then
               meson setup external/libfuse external/libfuse/build
             fi
-
             make all
 
       - name: Upload artifact
@@ -74,7 +69,6 @@ jobs:
   create-release:
     needs: build
     runs-on: ubuntu-latest
-    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
 
     steps:
       - name: Download all artifacts
@@ -82,21 +76,17 @@ jobs:
         with:
           path: binaries
 
-      - name: Display structure of downloaded files
-        run: ls -R binaries
-
       - name: Rename binaries
         run: |
           mkdir -p release
-          mv binaries/fusequota-x86_64-linux/fusequota-binary release/fusequota-x86_64-linux
-          mv binaries/fusequota-aarch64-linux/fusequota-binary release/fusequota-aarch64-linux
-          mv binaries/fusequota-riscv64-linux/fusequota-binary release/fusequota-riscv64-linux
-          mv binaries/fusequota-ppc64le-linux/fusequota-binary release/fusequota-ppc64le-linux
+          find binaries/ -type f -name "fusequota-binary" | while read -r file; do
+            ARCH_NAME=$(basename $(dirname "$file"))
+            cp "$file" "release/$ARCH_NAME"
+          done
           chmod +x release/*
 
       - name: Create Release
-        uses: softprops/action-gh-release@v1
-        if: startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v2
         with:
           files: release/*
         env:
