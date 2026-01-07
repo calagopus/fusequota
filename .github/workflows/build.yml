@@ -72,8 +72,7 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: ${{ matrix.artifact_name }}
-          path: ./build/fusequota
-          if-no-files-found: error
+          path: build/fusequota
 
   publish:
     name: Publish
