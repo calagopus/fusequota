@@ -1,0 +1,103 @@
+name: Build Multi-Architecture
+
+on:
+  push:
+    branches:
+      - main
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: x86_64
+            distro: ubuntu22.04
+            artifact_name: fusequota-x86_64-linux
+          - arch: aarch64
+            distro: ubuntu22.04
+            artifact_name: fusequota-aarch64-linux
+          - arch: riscv64
+            distro: ubuntu22.04
+            artifact_name: fusequota-riscv64-linux
+          - arch: ppc64le
+            distro: ubuntu22.04
+            artifact_name: fusequota-ppc64le-linux
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Build on ${{ matrix.arch }}
+        uses: uraimo/run-on-arch-action@v2
+        id: build
+        with:
+          arch: ${{ matrix.arch }}
+          distro: ${{ matrix.distro }}
+
+          githubToken: ${{ github.token }}
+
+          install: |
+            apt-get update -q -y
+            apt-get install -q -y \
+              build-essential \
+              cmake \
+              ninja-build \
+              meson \
+              pkg-config \
+              libfuse3-dev \
+              fuse3 \
+              python3-pip \
+              git
+
+          run: |
+            echo "Building fusequota for ${{ matrix.arch }}"
+
+            # Build libfuse from external submodule
+            echo "--- Building libfuse ---"
+            if [ ! -d "external/libfuse/build" ]; then
+              meson setup external/libfuse external/libfuse/build
+            fi
+
+            make all
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.artifact_name }}
+          path: ./fusequota/fusequota-binary
+          if-no-files-found: error
+
+  create-release:
+    needs: build
+    runs-on: ubuntu-latest
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+
+    steps:
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: binaries
+
+      - name: Display structure of downloaded files
+        run: ls -R binaries
+
+      - name: Rename binaries
+        run: |
+          mkdir -p release
+          mv binaries/fusequota-x86_64-linux/fusequota-binary release/fusequota-x86_64-linux
+          mv binaries/fusequota-aarch64-linux/fusequota-binary release/fusequota-aarch64-linux
+          mv binaries/fusequota-riscv64-linux/fusequota-binary release/fusequota-riscv64-linux
+          mv binaries/fusequota-ppc64le-linux/fusequota-binary release/fusequota-ppc64le-linux
+          chmod +x release/*
+
+      - name: Create Release
+        uses: softprops/action-gh-release@v1
+        if: startsWith(github.ref, 'refs/tags/')
+        with:
+          files: release/*
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
