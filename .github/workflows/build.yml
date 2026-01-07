@@ -26,7 +26,7 @@ jobs:
           sudo apt-get update -q -y
           sudo apt-get install -q -y \
             build-essential \
-            gcc-14 g++-14 \
+            gcc-14 g++-14 musl-tools musl-dev \
             cmake ninja-build meson pkg-config fuse3 git
 
           export CC=gcc-14
@@ -46,7 +46,7 @@ jobs:
             apt-get update -q -y
             apt-get install -q -y \
               build-essential \
-              gcc-14 g++-14 \
+              gcc-14 g++-14 musl-tools musl-dev \
               cmake ninja-build meson pkg-config fuse3 git
           run: |
             export CC=gcc-14

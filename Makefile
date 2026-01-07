@@ -9,13 +9,11 @@ all: libfuse $(BUILD_DIR)/Makefile
 	$(MAKE) -C $(BUILD_DIR)
 
 libfuse:
-	@echo "--- Checking External Dependencies ---"
-	@if [ ! -d "external/libfuse" ]; then \
-		echo "Error: external/libfuse directory not found."; exit 1; \
-	fi
-	@# Assuming libfuse uses Meson (standard for v3+)
+	@echo "--- Building libfuse (Static) ---"
 	@if [ ! -d "external/libfuse/build" ]; then \
-		meson setup external/libfuse external/libfuse/build; \
+		meson setup external/libfuse external/libfuse/build --default-library=static; \
+	else \
+		meson configure external/libfuse/build --default-library=static; \
 	fi
 	ninja -C external/libfuse/build
 

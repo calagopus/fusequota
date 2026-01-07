@@ -18,9 +18,17 @@ if(NOT CMAKE_BUILD_TYPE)
   set(CMAKE_BUILD_TYPE Release)
 endif()
 
+set(CMAKE_EXE_LINKER_FLAGS "-static")
+
 find_package(PkgConfig REQUIRED)
 set(ENV{PKG_CONFIG_PATH} "${CMAKE_SOURCE_DIR}/external/libfuse/build/meson-uninstalled:$ENV{PKG_CONFIG_PATH}")
 pkg_check_modules(FUSE3 REQUIRED IMPORTED_TARGET fuse3)
+
+find_library(FUSE3_STATIC_LIB 
+    NAMES libfuse3.a 
+    PATHS "${CMAKE_SOURCE_DIR}/external/libfuse/build/lib"
+    NO_DEFAULT_PATH
+)
 
 add_executable(fusequota
     src/main.cpp
@@ -29,7 +37,14 @@ add_executable(fusequota
     src/socket_server.cpp
 )
 
-target_compile_options(fusequota PRIVATE $<$<OR:$<CONFIG:Release>,$<CONFIG:RelWithDebInfo>>:-O3>)
+target_link_libraries(fusequota PRIVATE 
+    ${FUSE3_STATIC_LIB}
+    Threads::Threads
+    dl
+    m
+)
+
+target_compile_options(fusequota PRIVATE $<$<OR:$<CONFIG:Release>,$<CONFIG:RelWithDebInfo>>:-Os>)
 
 target_link_libraries(fusequota PRIVATE PkgConfig::FUSE3)
 
