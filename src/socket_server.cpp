@@ -59,6 +59,18 @@ void SocketServer::handle_client(int client_fd)
 			response = "ERROR: Invalid value\n";
 		}
 	}
+	else if (cmd == "do end")
+	{
+		response = "OK\n";
+		send(fd, response.data(), response.size(), 0);
+
+		if (fs.se)
+		{
+			fuse_session_exit(fs.se);
+		}
+		server_thread.request_stop();
+		return;
+	}
 	else
 	{
 		response = "ERROR: Unknown command\n";

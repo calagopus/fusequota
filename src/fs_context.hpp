@@ -28,6 +28,8 @@ struct Fs
 	bool direct_io{false};
 	bool passthrough{false};
 
+	struct fuse_session *se{nullptr};
+
 	QuotaManager quota;
 	SocketServer socket_server;
 };

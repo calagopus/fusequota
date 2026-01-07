@@ -106,6 +106,8 @@ int main(int argc, char *argv[])
 	if (!se)
 		return 1;
 
+	fs.se = se;
+
 	auto se_guard = std::unique_ptr<fuse_session, decltype(&fuse_session_destroy)>(se, &fuse_session_destroy);
 
 	if (fuse_set_signal_handlers(se) != 0)
