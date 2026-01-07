@@ -79,6 +79,10 @@ jobs:
         with:
           path: binaries
 
+      - name: Get tag or commit id
+        id: get-version-id
+        uses: iawia002/get-tag-or-commit-id@v1
+
       - name: Rename binaries
         run: |
           mkdir -p release
@@ -89,8 +93,11 @@ jobs:
           chmod +x release/*
 
       - name: Create Release
-        uses: softprops/action-gh-release@v2
+        uses: svenstaro/upload-release-action@v2
         with:
-          files: release/*
+          file: release/*
+          file_glob: true
+          tag: ${{ steps.get-version-id.outputs.id }}
+          overwrite: true
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
