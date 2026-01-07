@@ -37,27 +37,39 @@ int main(int argc, char *argv[])
 	fs.num_threads = options["num-threads"].as<int>();
 	fs.clone_fd = options.count("clone-fd");
 	fs.direct_io = options.count("direct-io");
-
 	fs.timeout = options.count("nocache") ? 0.0 : 86400.0;
+
+	bool start_quota = false;
+	uint64_t quota_limit = 0;
+	int quota_interval = 0;
 
 	if (options.count("quota"))
 	{
-		uint64_t limit = options["quota"].as<uint64_t>();
-		int interval = options["quota-rescan-interval"].as<int>();
+		start_quota = true;
+		quota_limit = options["quota"].as<uint64_t>();
+		quota_interval = options["quota-rescan-interval"].as<int>();
 
 		if (fs.passthrough)
 		{
 			std::println(stderr, "NOTICE: Disabling passthrough for quota enforcement.");
 			fs.passthrough = false;
 		}
-
-		fs.quota.init(fs.source, limit, interval);
 	}
+
+	bool start_socket = false;
+	std::string socket_path;
 
 	if (options.count("communication-socket-path"))
 	{
-		std::string path = options["communication-socket-path"].as<std::string>();
-		std::filesystem::path p(path);
+		std::string raw_path = options["communication-socket-path"].as<std::string>();
+
+		std::error_code ec;
+		std::filesystem::path p = std::filesystem::absolute(raw_path, ec);
+		if (ec)
+		{
+			error_print("Invalid socket path: {}", raw_path);
+			exit(1);
+		}
 
 		if (!std::filesystem::exists(p.parent_path()))
 		{
@@ -65,8 +77,8 @@ int main(int argc, char *argv[])
 			exit(1);
 		}
 
-		fs.socket_server.start(path);
-		std::println("Control socket started at {}", path);
+		socket_path = p.string();
+		start_socket = true;
 	}
 
 	if (options.count("uid"))
@@ -135,7 +147,26 @@ int main(int argc, char *argv[])
 		return 1;
 	}
 
-	fuse_daemonize(fs.foreground);
+	if (fuse_daemonize(fs.foreground) != 0)
+	{
+		error_print("Failed to daemonize process");
+		fuse_remove_signal_handlers(se);
+		return 1;
+	}
+
+	if (start_quota)
+	{
+		fs.quota.init(fs.source, quota_limit, quota_interval);
+	}
+
+	if (start_socket)
+	{
+		fs.socket_server.start(socket_path);
+		if (fs.foreground)
+		{
+			std::println("Control socket started at {}", socket_path);
+		}
+	}
 
 	struct fuse_loop_config *loop_config = fuse_loop_cfg_create();
 	auto loop_guard = std::unique_ptr<fuse_loop_config, decltype(&fuse_loop_cfg_destroy)>(loop_config, &fuse_loop_cfg_destroy);
