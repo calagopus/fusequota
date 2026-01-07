@@ -12,11 +12,6 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        build:
-          - x86_64-linux
-          - aarch64-linux
-          - riscv64-linux
-          - ppc64le-linux
         arch: [x86_64, aarch64, riscv64, ppc64le]
 
     steps:
