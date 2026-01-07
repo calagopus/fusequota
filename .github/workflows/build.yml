@@ -17,11 +17,7 @@ jobs:
           - aarch64-linux
           - riscv64-linux
           - ppc64le-linux
-        include:
-          - arch: x86_64
-          - arch: aarch64
-          - arch: riscv64
-          - arch: ppc64le
+        arch: [x86_64, aarch64, riscv64, ppc64le]
 
     steps:
       - name: Checkout code
