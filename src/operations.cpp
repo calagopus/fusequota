@@ -47,6 +47,30 @@ static DirHandle *get_dir_handle(fuse_file_info *fi)
 	return reinterpret_cast<DirHandle *>(fi->fh);
 }
 
+static void enforce_ownership(int dirfd, const char *name, int fd = -1)
+{
+	if (!fs.needs_chown())
+		return;
+
+	uid_t u = fs.force_uid_enabled ? fs.force_uid : -1;
+	gid_t g = fs.force_gid_enabled ? fs.force_gid : -1;
+
+	int res = 0;
+	if (fd >= 0)
+	{
+		res = fchown(fd, u, g);
+	}
+	else
+	{
+		res = fchownat(dirfd, name, u, g, AT_SYMLINK_NOFOLLOW);
+	}
+
+	if (res == -1)
+	{
+		error_print("WARNING: Failed to chown created file '{}': {}", name, errno);
+	}
+}
+
 static void forget_one(fuse_ino_t ino, uint64_t n)
 {
 	Inode &inode = get_inode(ino);
@@ -242,11 +266,6 @@ static void sfs_setattr(fuse_req_t req, fuse_ino_t ino, struct stat *attr, int v
 		g.unlock();
 	}
 
-	// Pass other attributes (mode, uid, etc.) if requested - simplistic implementation
-	// Note: The original code omitted specific chmod/chown logic in the snippet for brevity,
-	// but full implementation would go here using fchmod/fchown.
-	// Assuming standard passthrough via getattr for now since we updated size.
-
 	return sfs_getattr(req, ino, fi);
 }
 
@@ -294,6 +313,8 @@ static void mknod_symlink(fuse_req_t req, fuse_ino_t parent, const char *name,
 		fuse_reply_err(req, saverr);
 		return;
 	}
+
+	enforce_ownership(inode_p.fd, name, -1);
 
 	fuse_entry_param e;
 	saverr = do_lookup(parent, name, &e);
@@ -631,6 +652,8 @@ static void sfs_create(fuse_req_t req, fuse_ino_t parent, const char *name, mode
 		return;
 	}
 
+	enforce_ownership(inode_p.fd, name, fd);
+
 	fi->fh = fd;
 	fuse_entry_param e;
 	auto err = do_lookup(parent, name, &e);
@@ -671,6 +694,8 @@ static void sfs_open(fuse_req_t req, fuse_ino_t ino, fuse_file_info *fi)
 		fuse_reply_err(req, errno);
 		return;
 	}
+
+	enforce_ownership(-1, nullptr, fd);
 
 	std::lock_guard<std::mutex> g{inode.m};
 	inode.nopen++;

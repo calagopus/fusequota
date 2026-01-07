@@ -10,7 +10,7 @@ int main(int argc, char *argv[])
 	std::vector<std::string> mount_options;
 	std::vector<std::string> positional_args;
 
-	opt_parser.add_options()("debug", "Enable filesystem debug messages")("debug-fuse", "Enable libfuse debug messages")("foreground", "Run in foreground")("help", "Print help")("nocache", "Disable attribute all caching")("nosplice", "Do not use splice(2)")("nopassthrough", "Disable passthrough")("single", "Run single-threaded")("o", "Mount options", cxxopts::value(mount_options))("num-threads", "Number of threads", cxxopts::value<int>()->default_value("-1"))("clone-fd", "Separate fuse device fd per thread")("direct-io", "Enable internal direct-io")("quota", "Global quota limit in bytes", cxxopts::value<uint64_t>())("quota-rescan-interval", "Quota background rescan interval (seconds, 0=off)", cxxopts::value<int>()->default_value("0"))("communication-socket-path", "Path for the control socket", cxxopts::value<std::string>())("filenames", "Positional arguments", cxxopts::value<std::vector<std::string>>(positional_args));
+	opt_parser.add_options()("debug", "Enable filesystem debug messages")("debug-fuse", "Enable libfuse debug messages")("foreground", "Run in foreground")("help", "Print help")("nocache", "Disable attribute all caching")("nosplice", "Do not use splice(2)")("nopassthrough", "Disable passthrough")("single", "Run single-threaded")("o", "Mount options", cxxopts::value(mount_options))("num-threads", "Number of threads", cxxopts::value<int>()->default_value("-1"))("clone-fd", "Separate fuse device fd per thread")("direct-io", "Enable internal direct-io")("quota", "Global quota limit in bytes", cxxopts::value<uint64_t>())("quota-rescan-interval", "Quota background rescan interval (seconds, 0=off)", cxxopts::value<int>()->default_value("0"))("communication-socket-path", "Path for the control socket", cxxopts::value<std::string>())("uid", "Force ownership of created files to this UID", cxxopts::value<uid_t>())("gid", "Force ownership of created files to this GID", cxxopts::value<gid_t>())("filenames", "Positional arguments", cxxopts::value<std::vector<std::string>>(positional_args));
 
 	opt_parser.parse_positional({"filenames"});
 	auto options = opt_parser.parse(argc, argv);
@@ -67,6 +67,17 @@ int main(int argc, char *argv[])
 
 		fs.socket_server.start(path);
 		std::println("Control socket started at {}", path);
+	}
+
+	if (options.count("uid"))
+	{
+		fs.force_uid = options["uid"].as<uid_t>();
+		fs.force_uid_enabled = true;
+	}
+	if (options.count("gid"))
+	{
+		fs.force_gid = options["gid"].as<gid_t>();
+		fs.force_gid_enabled = true;
 	}
 
 	std::unique_ptr<char, decltype(&free)> resolved_path(realpath(fs.source.c_str(), NULL), &free);

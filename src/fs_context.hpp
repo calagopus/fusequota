@@ -28,10 +28,18 @@ struct Fs
 	bool direct_io{false};
 	bool passthrough{false};
 
+	bool force_uid_enabled{false};
+	uid_t force_uid{0};
+
+	bool force_gid_enabled{false};
+	gid_t force_gid{0};
+
 	struct fuse_session *se{nullptr};
 
 	QuotaManager quota;
 	SocketServer socket_server;
+
+	bool needs_chown() const { return force_uid_enabled || force_gid_enabled; }
 };
 
 extern Fs fs;
