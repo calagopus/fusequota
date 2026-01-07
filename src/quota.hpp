@@ -15,6 +15,10 @@ public:
 	void release(uint64_t current_file_size, uint64_t new_file_size);
 
 	uint64_t get_usage() const { return used_bytes.load(); }
+	void set_usage(uint64_t new_usage)
+	{
+		used_bytes.store(new_usage);
+	}
 	uint64_t get_limit() const { return quota_limit.load(std::memory_order_relaxed); }
 	void set_limit(uint64_t new_limit)
 	{

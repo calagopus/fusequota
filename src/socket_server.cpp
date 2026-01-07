@@ -59,6 +59,60 @@ void SocketServer::handle_client(int client_fd)
 			response = "ERROR: Invalid value\n";
 		}
 	}
+	else if (cmd.starts_with("set quota_used = "))
+	{
+		try
+		{
+			std::string val_str{cmd.substr(17)};
+			uint64_t new_usage = std::stoull(val_str);
+
+			fs.quota.set_usage(new_usage);
+			response = "OK\n";
+		}
+		catch (...)
+		{
+			response = "ERROR: Invalid value\n";
+		}
+	}
+	else if (cmd.starts_with("add quota_used = "))
+	{
+		try
+		{
+			std::string val_str{cmd.substr(17)};
+			uint64_t add_val = std::stoull(val_str);
+
+			uint64_t current = fs.quota.get_usage();
+			fs.quota.set_usage(current + add_val);
+			response = "OK\n";
+		}
+		catch (...)
+		{
+			response = "ERROR: Invalid value\n";
+		}
+	}
+	else if (cmd.starts_with("rem quota_used = "))
+	{
+		try
+		{
+			std::string val_str{cmd.substr(17)};
+			uint64_t rem_val = std::stoull(val_str);
+
+			uint64_t current = fs.quota.get_usage();
+			if (rem_val > current)
+			{
+				fs.quota.set_usage(0);
+			}
+			else
+			{
+				fs.quota.set_usage(current - rem_val);
+			}
+			response = "OK\n";
+		}
+		catch (...)
+		{
+			response = "ERROR: Invalid value\n";
+		}
+	}
 	else if (cmd == "do end")
 	{
 		response = "OK\n";
