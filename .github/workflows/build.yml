@@ -56,6 +56,9 @@ jobs:
               gcc-14 g++-14 \
               cmake ninja-build meson pkg-config fuse3 git
           run: |
+            export CC=gcc-14
+            export CXX=g++-14
+
             echo "Building fusequota for ${{ matrix.arch }}"
             make all
 
