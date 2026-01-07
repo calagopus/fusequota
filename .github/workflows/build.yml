@@ -63,7 +63,7 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: ${{ matrix.artifact_name }}
-          path: ./fusequota/fusequota-binary
+          path: ./build/fusequota
           if-no-files-found: error
 
   create-release:
@@ -79,7 +79,7 @@ jobs:
       - name: Rename binaries
         run: |
           mkdir -p release
-          find binaries/ -type f -name "fusequota-binary" | while read -r file; do
+          find binaries/ -type f -name "fusequota" | while read -r file; do
             ARCH_NAME=$(basename $(dirname "$file"))
             cp "$file" "release/$ARCH_NAME"
           done
