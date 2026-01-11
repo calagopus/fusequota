@@ -94,7 +94,7 @@ bool QuotaManager::reserve(uint64_t current_file_size, uint64_t new_file_size)
 	uint64_t current_usage = used_bytes.load();
 	uint64_t limit = quota_limit.load();
 
-	if (current_usage + delta > limit)
+	if (current_usage + delta > limit && limit != 0)
 	{
 		return false;
 	}
@@ -102,7 +102,7 @@ bool QuotaManager::reserve(uint64_t current_file_size, uint64_t new_file_size)
 	while (!used_bytes.compare_exchange_weak(current_usage, current_usage + delta))
 	{
 		limit = quota_limit.load();
-		if (current_usage + delta > limit)
+		if (current_usage + delta > limit && limit != 0)
 			return false;
 	}
 	return true;
