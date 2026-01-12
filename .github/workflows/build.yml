@@ -35,10 +35,10 @@ jobs:
       - name: Prepare Release Binaries
         run: |
           mkdir -p release
-          cp dist/linux_amd64/fusequota_musl release/fusequota-x86_64
-          cp dist/linux_arm64/fusequota_musl release/fusequota-aarch64
-          cp dist/linux_riscv64/fusequota_musl release/fusequota-riscv64
-          cp dist/linux_ppc64le/fusequota_musl release/fusequota-ppc64le
+          cp dist/linux_amd64/fusequota_musl release/fusequota-x86_64-linux
+          cp dist/linux_arm64/fusequota_musl release/fusequota-aarch64-linux
+          cp dist/linux_riscv64/fusequota_musl release/fusequota-riscv64-linux
+          cp dist/linux_ppc64le/fusequota_musl release/fusequota-ppc64le-linux
           chmod +x release/*
 
       - name: Get tag or commit id
