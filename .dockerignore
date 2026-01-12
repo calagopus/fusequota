@@ -1,0 +1,5 @@
+build/
+external/libfuse/build/
+.git/
+*.o
+*.a

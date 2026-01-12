@@ -9,10 +9,8 @@ jobs:
   dist:
     name: Dist
     runs-on: ubuntu-24.04
-    strategy:
-      fail-fast: false
-      matrix:
-        arch: [x86_64, aarch64, riscv64, ppc64le]
+    permissions:
+      contents: write
 
     steps:
       - name: Checkout code
@@ -20,79 +18,38 @@ jobs:
         with:
           submodules: recursive
 
-      - name: Dist (Native x86_64)
-        if: matrix.arch == 'x86_64'
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v3
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build and Export Musl Binaries
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: ./Dockerfile.musl
+          platforms: linux/amd64,linux/arm64,linux/riscv64,linux/ppc64le
+          outputs: type=local,dest=./dist
+
+      - name: Prepare Release Binaries
         run: |
-          sudo apt-get update -q -y
-          sudo apt-get install -q -y \
-            build-essential \
-            gcc-14 g++-14 musl-tools musl-dev \
-            cmake ninja-build meson pkg-config fuse3 git
-
-          export CC=gcc-14
-          export CXX=g++-14
-
-          echo "Building fusequota for ${{ matrix.arch }}"
-          make all
-
-      - name: Dist (Emulated ${{ matrix.arch }})
-        if: matrix.arch != 'x86_64'
-        uses: uraimo/run-on-arch-action@v3
-        with:
-          arch: ${{ matrix.arch }}
-          distro: ubuntu24.04
-          githubToken: ${{ github.token }}
-          install: |
-            apt-get update -q -y
-            apt-get install -q -y \
-              build-essential \
-              gcc-14 g++-14 musl-tools musl-dev \
-              cmake ninja-build meson pkg-config fuse3 git
-          run: |
-            export CC=gcc-14
-            export CXX=g++-14
-
-            echo "Building fusequota for ${{ matrix.arch }}"
-            make all
-
-      - name: Upload artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: fusequota-${{ matrix.arch }}-linux
-          path: build/fusequota
-
-  publish:
-    name: Publish
-    needs: [dist]
-    runs-on: ubuntu-24.04
-    permissions:
-      contents: write
-
-    steps:
-      - name: Download all artifacts
-        uses: actions/download-artifact@v4
-        with:
-          path: binaries
+          mkdir -p release
+          cp dist/linux_amd64/fusequota_musl release/fusequota-x86_64
+          cp dist/linux_arm64/fusequota_musl release/fusequota-aarch64
+          cp dist/linux_riscv64/fusequota_musl release/fusequota-riscv64
+          cp dist/linux_ppc64le/fusequota_musl release/fusequota-ppc64le
+          chmod +x release/*
 
       - name: Get tag or commit id
         id: get-version-id
         uses: iawia002/get-tag-or-commit-id@v1
 
-      - name: Rename binaries
-        run: |
-          mkdir -p release
-          find binaries/ -type f -name "fusequota" | while read -r file; do
-            ARCH_NAME=$(basename $(dirname "$file"))
-            cp "$file" "release/$ARCH_NAME"
-          done
-          chmod +x release/*
-
       - name: Create Release
         uses: svenstaro/upload-release-action@v2
         with:
+          repo_token: ${{ secrets.GITHUB_TOKEN }}
           file: release/*
           file_glob: true
           tag: ${{ steps.get-version-id.outputs.id }}
           overwrite: true
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

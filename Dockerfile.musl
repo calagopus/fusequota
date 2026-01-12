@@ -1,0 +1,37 @@
+FROM alpine:edge AS builder
+
+RUN apk add --no-cache \
+    build-base \
+    cmake \
+    git \
+    meson \
+    ninja \
+    linux-headers \
+    pkgconf
+
+WORKDIR /app
+
+COPY . .
+
+RUN rm -rf external/libfuse/build && \
+    meson setup external/libfuse external/libfuse/build \
+        --default-library=static \
+        --prefix=/usr \
+        -Dexamples=false \
+        -Dtests=false \
+        -Dutils=false && \
+    ninja -C external/libfuse/build
+
+RUN rm -rf /app/build && mkdir -p /app/build
+WORKDIR /app/build
+
+RUN cmake .. \
+    -DCMAKE_BUILD_TYPE=Release \
+    -DCMAKE_CXX_FLAGS="-Os -ffunction-sections -fdata-sections" \
+    -DCMAKE_EXE_LINKER_FLAGS="-static -static-libstdc++ -static-libgcc -Wl,--gc-sections" \
+    && make -j$(nproc)
+
+RUN strip --strip-all -R .comment -R .note fusequota
+
+FROM scratch AS export
+COPY --from=builder /app/build/fusequota /fusequota_musl

@@ -44,7 +44,22 @@ target_link_libraries(fusequota PRIVATE
     m
 )
 
-target_compile_options(fusequota PRIVATE $<$<OR:$<CONFIG:Release>,$<CONFIG:RelWithDebInfo>>:-Os>)
+target_compile_options(fusequota PRIVATE 
+    $<$<OR:$<CONFIG:Release>,$<CONFIG:RelWithDebInfo>>:
+        -Os
+        -ffunction-sections
+        -fdata-sections
+        -fno-rtti
+    >
+)
+
+target_link_options(fusequota PRIVATE 
+    $<$<OR:$<CONFIG:Release>,$<CONFIG:RelWithDebInfo>>:
+        -Wl,--gc-sections
+    >
+)
+
+target_compile_definitions(fusequota PRIVATE CXXOPTS_NO_RTTI)
 
 target_link_libraries(fusequota PRIVATE PkgConfig::FUSE3)
 
@@ -53,7 +68,7 @@ target_link_libraries(fusequota PRIVATE Threads::Threads)
 
 if(NOT CMAKE_BUILD_TYPE STREQUAL "Debug")
     add_custom_command(TARGET fusequota POST_BUILD
-        COMMAND ${CMAKE_STRIP} $<TARGET_FILE:fusequota>
-        COMMENT "Stripping symbols from fusequota"
+        COMMAND ${CMAKE_STRIP} --strip-all -R .comment -R .note $<TARGET_FILE:fusequota>
+        COMMENT "Aggressively stripping symbols from fusequota"
     )
 endif()

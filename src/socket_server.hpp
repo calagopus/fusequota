@@ -1,20 +1,19 @@
 #pragma once
-#include "common.hpp"
-#include <thread>
 #include <string>
+#include <thread>
+#include "common.hpp"
 
-class SocketServer
-{
-public:
-	SocketServer() = default;
-	~SocketServer();
+class SocketServer {
+  public:
+    SocketServer() = default;
+    ~SocketServer();
 
-	void start(const std::string &path);
+    void start(const std::string &path);
 
-private:
-	void run(std::stop_token st);
-	void handle_client(int client_fd);
+  private:
+    void run(std::stop_token st);
+    void handle_client(int client_fd);
 
-	std::string socket_path;
-	std::jthread server_thread;
+    std::string socket_path;
+    std::jthread server_thread;
 };
