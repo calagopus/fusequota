@@ -182,6 +182,8 @@ int main(int argc, char *argv[]) {
     fuse_session_unmount(se);
     fuse_remove_signal_handlers(se);
 
+    fs.shutdown_complete.release();
+
     fuse_opt_free_args(&args);
 
     return ret;

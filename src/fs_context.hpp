@@ -33,7 +33,8 @@ struct Fs {
     bool force_gid_enabled{false};
     gid_t force_gid{0};
 
-    struct fuse_session *se{nullptr};
+    struct fuse_session *se = nullptr;
+    std::binary_semaphore shutdown_complete{0};
 
     QuotaManager quota;
     SocketServer socket_server;

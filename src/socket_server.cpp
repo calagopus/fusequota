@@ -85,12 +85,17 @@ void SocketServer::handle_client(int client_fd) {
             response = "ERROR: Invalid value\n";
         }
     } else if (cmd == "do end") {
-        response = "OK\n";
-        send(fd, response.data(), response.size(), 0);
-
         if (fs.se) {
             fuse_session_exit(fs.se);
         }
+
+        if (fs.se && !fs.shutdown_complete.try_acquire_for(std::chrono::milliseconds(2000))) {
+            response = "ERROR: Shutdown timed out\n";
+        } else {
+            response = "OK\n";
+        }
+
+        send(fd, response.data(), response.size(), 0);
         server_thread.request_stop();
         return;
     } else {
