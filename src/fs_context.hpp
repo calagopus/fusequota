@@ -25,7 +25,7 @@ struct Fs {
 
     std::string fuse_mount_options;
     bool direct_io{false};
-    bool passthrough{false};
+    bool passthrough{true};
 
     bool force_uid_enabled{false};
     uid_t force_uid{0};

@@ -58,11 +58,6 @@ int main(int argc, char *argv[]) {
         start_quota = true;
         quota_limit = options["quota"].as<uint64_t>();
         quota_interval = options["quota-rescan-interval"].as<int>();
-
-        if (fs.passthrough) {
-            std::println(stderr, "NOTICE: Disabling passthrough for quota enforcement.");
-            fs.passthrough = false;
-        }
     }
 
     bool start_socket = false;

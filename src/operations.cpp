@@ -152,7 +152,7 @@ static void sfs_init(void *userdata, fuse_conn_info *conn) {
     if (!fuse_set_feature_flag(conn, FUSE_CAP_PASSTHROUGH))
         fs.passthrough = false;
 
-    if (fs.timeout && !fs.passthrough)
+    if (fs.timeout)
         fuse_set_feature_flag(conn, FUSE_CAP_WRITEBACK_CACHE);
 
     fuse_set_feature_flag(conn, FUSE_CAP_FLOCK_LOCKS);
@@ -525,17 +525,22 @@ static void sfs_fsyncdir(fuse_req_t req, fuse_ino_t ino, int datasync, fuse_file
 }
 
 static void do_passthrough_open(fuse_req_t req, fuse_ino_t ino, int fd, fuse_file_info *fi) {
+    bool is_write = (fi->flags & O_WRONLY) || (fi->flags & O_RDWR);
+
+    debug_print("is_write: {}, flags: {}", is_write, fi->flags);
+
     Inode &inode = get_inode(ino);
     if (inode.backing_id) {
         fi->backing_id = inode.backing_id;
-    } else if (!(inode.backing_id = fuse_passthrough_open(req, fd))) {
+    } else if (is_write) {
+        debug_print("not handling fuse_passthrough due to writing.");
+    }
+    if (!(inode.backing_id = fuse_passthrough_open(req, fd))) {
         debug_print("fuse_passthrough_open failed for inode {}, disabling rw passthrough.", ino);
-        fs.passthrough = false;
     } else {
         fi->backing_id = inode.backing_id;
     }
-    if (fi->backing_id)
-        fi->keep_cache = false;
+    fi->keep_cache = false;
 }
 
 static void sfs_create_open_flags(fuse_file_info *fi) {
@@ -574,8 +579,6 @@ static void sfs_create(fuse_req_t req, fuse_ino_t parent, const char *name, mode
 
     sfs_create_open_flags(fi);
 
-    if (fs.passthrough)
-        do_passthrough_open(req, e.ino, fd, fi);
     fuse_reply_create(req, &e, fi);
 }
 
@@ -667,10 +670,6 @@ static void sfs_read(fuse_req_t req, fuse_ino_t ino, size_t size, off_t off, fus
 static void sfs_write_buf(fuse_req_t req, fuse_ino_t ino, fuse_bufvec *in_buf, off_t off,
                           fuse_file_info *fi) {
     Inode &inode = get_inode(ino);
-    if (fs.passthrough && !fs.direct_io) {
-        fuse_reply_err(req, EIO);
-        return;
-    }
 
     size_t size = fuse_buf_size(in_buf);
     uint64_t write_end = off + size;
