@@ -534,8 +534,7 @@ static void do_passthrough_open(fuse_req_t req, fuse_ino_t ino, int fd, fuse_fil
         fi->backing_id = inode.backing_id;
     } else if (is_write) {
         debug_print("not handling fuse_passthrough due to writing.");
-    }
-    if (!(inode.backing_id = fuse_passthrough_open(req, fd))) {
+    } else if (!(inode.backing_id = fuse_passthrough_open(req, fd))) {
         debug_print("fuse_passthrough_open failed for inode {}, disabling rw passthrough.", ino);
     } else {
         fi->backing_id = inode.backing_id;
