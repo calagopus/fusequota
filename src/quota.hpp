@@ -30,7 +30,7 @@ class QuotaManager {
     }
 
   private:
-    void calculate_usage();
+    void calculate_usage(std::stop_token st);
     void background_scanner(std::stop_token st);
 
     bool enabled{false};

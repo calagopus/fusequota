@@ -22,7 +22,7 @@ void QuotaManager::init(const std::string &source_path, uint64_t limit, int resc
     }
 }
 
-void QuotaManager::calculate_usage() {
+void QuotaManager::calculate_usage(std::stop_token st) {
     namespace fsys = std::filesystem;
 
     std::unordered_set<SrcId> seen_inodes;
@@ -30,6 +30,10 @@ void QuotaManager::calculate_usage() {
 
     try {
         for (const auto &entry : fsys::recursive_directory_iterator(source_dir)) {
+            if (st.stop_requested()) {
+                return;
+            }
+
             if (entry.is_regular_file()) {
                 struct stat st;
                 if (stat(entry.path().c_str(), &st) == 0) {
@@ -64,7 +68,7 @@ void QuotaManager::background_scanner(std::stop_token st) {
         }
 
         uint64_t pre_scan = used_bytes.load();
-        calculate_usage();
+        calculate_usage(st);
         uint64_t post_scan = used_bytes.load();
 
         if (pre_scan != post_scan) {
