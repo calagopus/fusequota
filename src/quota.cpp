@@ -14,7 +14,7 @@ void QuotaManager::init(const std::string &source_path, uint64_t limit, int resc
     rescan_interval = std::chrono::seconds(rescan_seconds);
     enabled = true;
 
-    calculate_usage();
+    calculate_usage(std::stop_token{});
 
     if (rescan_interval.count() > 0) {
         std::println("QUOTA: Starting background rescan thread (Interval: {}s)", rescan_seconds);
