@@ -1,4 +1,6 @@
 #include "quota.hpp"
+#include <condition_variable>
+#include <mutex>
 #include <unordered_set>
 #include "inode.hpp"
 
@@ -48,8 +50,16 @@ void QuotaManager::calculate_usage() {
 }
 
 void QuotaManager::background_scanner(std::stop_token st) {
+    std::mutex mtx;
+    std::condition_variable_any cv;
+
     while (!st.stop_requested()) {
-        if (std::this_thread::sleep_for(rescan_interval); st.stop_requested()) {
+        std::unique_lock lock(mtx);
+
+        bool stop_now =
+            cv.wait_for(lock, st, rescan_interval, [&st] { return st.stop_requested(); });
+
+        if (stop_now) {
             break;
         }
 

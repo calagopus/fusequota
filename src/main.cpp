@@ -171,15 +171,23 @@ int main(int argc, char *argv[]) {
         fuse_loop_cfg_set_max_threads(loop_config, fs.num_threads);
     fuse_loop_cfg_set_clone_fd(loop_config, fs.clone_fd);
 
+    debug_print("Filesystem mounted at {}", mountpoint);
+
     int ret =
         options.count("single") ? fuse_session_loop(se) : fuse_session_loop_mt(se, loop_config);
+
+    debug_print("Filesystem unmounting");
 
     fuse_session_unmount(se);
     fuse_remove_signal_handlers(se);
 
+    debug_print("Filesystem unmounted");
+
     fs.shutdown_complete.release();
 
     fuse_opt_free_args(&args);
+
+    debug_print("Filesystem exited with code {}", ret);
 
     return ret;
 }
