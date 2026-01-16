@@ -12,7 +12,7 @@ class SocketServer {
 
   private:
     void run(std::stop_token st);
-    void handle_client(int client_fd);
+    bool handle_client(int client_fd);
 
     std::string socket_path;
     std::jthread server_thread;

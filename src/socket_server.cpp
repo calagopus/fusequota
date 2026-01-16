@@ -16,12 +16,12 @@ void SocketServer::start(const std::string &path) {
     server_thread = std::jthread(std::bind_front(&SocketServer::run, this));
 }
 
-void SocketServer::handle_client(int client_fd) {
+bool SocketServer::handle_client(int client_fd) {
     UniqueFd fd(client_fd);
     char buffer[1024];
     ssize_t n = read(fd, buffer, sizeof(buffer) - 1);
     if (n <= 0)
-        return;
+        return true;
 
     buffer[n] = '\0';
     std::string_view request(buffer);
@@ -89,20 +89,15 @@ void SocketServer::handle_client(int client_fd) {
             fuse_session_exit(fs.se);
         }
 
-        if (fs.se && !fs.shutdown_complete.try_acquire_for(std::chrono::milliseconds(2000))) {
-            response = "ERROR: Shutdown timed out\n";
-        } else {
-            response = "OK\n";
-        }
-
+        response = "OK\n";
         send(fd, response.data(), response.size(), 0);
-        server_thread.request_stop();
-        return;
+        return false;
     } else {
         response = "ERROR: Unknown command\n";
     }
 
     send(fd, response.data(), response.size(), 0);
+    return true;
 }
 
 void SocketServer::run(std::stop_token st) {
@@ -130,7 +125,9 @@ void SocketServer::run(std::stop_token st) {
     while (!st.stop_requested()) {
         int client_fd = accept(server_fd, nullptr, nullptr);
         if (client_fd >= 0) {
-            handle_client(client_fd);
+            if (!handle_client(client_fd)) {
+                break;
+            }
         }
     }
 }
