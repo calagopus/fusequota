@@ -189,6 +189,5 @@ int main(int argc, char *argv[]) {
 
     debug_print("Filesystem exited with code {}", ret);
 
-    fuse_session_destroy(se);
     return ret;
 }
