@@ -532,12 +532,14 @@ static void do_passthrough_open(fuse_req_t req, fuse_ino_t ino, int fd, fuse_fil
     Inode &inode = get_inode(ino);
     if (inode.backing_id) {
         fi->backing_id = inode.backing_id;
+        debug_print("reusing existing backing_id for inode {}", ino);
     } else if (is_write) {
         debug_print("not handling fuse_passthrough due to writing.");
     } else if (!(inode.backing_id = fuse_passthrough_open(req, fd))) {
         debug_print("fuse_passthrough_open failed for inode {}, disabling rw passthrough.", ino);
     } else {
         fi->backing_id = inode.backing_id;
+        debug_print("assigned new backing_id for inode {}", ino);
     }
     fi->keep_cache = false;
 }
@@ -555,6 +557,9 @@ static void sfs_create_open_flags(fuse_file_info *fi) {
 static void sfs_create(fuse_req_t req, fuse_ino_t parent, const char *name, mode_t mode,
                        fuse_file_info *fi) {
     Inode &inode_p = get_inode(parent);
+
+    debug_print("sfs_create: parent ino {}, name '{}', mode {:o}, flags {:o}", parent, name, mode,
+                fi->flags);
 
     int fd = openat(inode_p.fd, name, (fi->flags | O_CREAT) & ~O_NOFOLLOW, mode);
     if (fd == -1) {
@@ -639,17 +644,13 @@ static void sfs_fsync(fuse_req_t req, fuse_ino_t ino, int datasync, fuse_file_in
 
 static void sfs_read(fuse_req_t req, fuse_ino_t ino, size_t size, off_t off, fuse_file_info *fi) {
     (void)ino;
-    if (fs.passthrough && !fs.direct_io) {
-        fuse_reply_err(req, EIO);
-        return;
-    }
 
     fuse_bufvec buf = FUSE_BUFVEC_INIT(size);
     char *payload = nullptr;
     size_t payload_size = 0;
     int res = fuse_req_get_payload(req, &payload, &payload_size, NULL);
 
-    if (res == 0) {
+    if (res == 0 && payload_size >= size) {
         buf.buf[0].mem = payload;
         buf.buf[0].size = payload_size;
         res = pread(fi->fh, payload, size, off);
