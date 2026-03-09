@@ -124,10 +124,8 @@ void SocketServer::run(std::stop_token st) {
 
     while (!st.stop_requested()) {
         int client_fd = accept(server_fd, nullptr, nullptr);
-        if (client_fd >= 0) {
-            if (!handle_client(client_fd)) {
-                break;
-            }
+        if (client_fd >= 0 && !handle_client(client_fd)) {
+            break;
         }
     }
 }

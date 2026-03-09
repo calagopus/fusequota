@@ -1,3 +1,5 @@
+![Calagopus Logo](https://calagopus.com/fulllogo.svg)
+
 # fusequota
 
 FuseQuota is a small program that uses FUSE to mount a virtual filesystem which enforces a disk quota on files created within it. It is designed for usage in [Calagopus Wings](https://github.com/calagopus/wings) to limit the disk usage of servers on systems that do not support native quotas.
@@ -8,6 +10,8 @@ FuseQuota is a small program that uses FUSE to mount a virtual filesystem which 
 - Transparent integration with existing applications using standard file operations.
 - Configurable quota size via socket communication.
 - Built using FUSE for cross-platform compatibility.
+- Using Modern Passthrough FUSE API for better read performance.
+- Supports dynamic quota adjustments without unmounting the filesystem.
 - Written in C++ for performance and efficiency.
 
 ## Requirements

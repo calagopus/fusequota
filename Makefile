@@ -49,3 +49,5 @@ help:
 	@echo "  make         - Build libfuse and the main project"
 	@echo "  make install - Build and install the binary to $(INSTALL_DIR)"
 	@echo "  make clean   - Remove build directories"
+	@echo "  make musl    - Build a static binary using musl (via Docker)"
+	@echo "  make format  - Format source code using clang-format"
