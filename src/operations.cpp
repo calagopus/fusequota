@@ -57,7 +57,10 @@ static void enforce_ownership(int dirfd, const char *name, int fd = -1) {
     }
 
     if (res == -1) {
-        error_print("WARNING: Failed to chown created file '{}': {}", name, errno);
+        if (name)
+            error_print("WARNING: Failed to chown created file '{}': {}", name, errno);
+        else
+            error_print("WARNING: Failed to fchown fd {}: {}", fd, errno);
     }
 }
 
@@ -74,8 +77,9 @@ static void forget_one(fuse_ino_t ino, uint64_t n) {
     debug_print("forget: inode {} count now {}", inode.src_ino, inode.nlookup.load());
 
     if (!inode.nlookup) {
-        std::lock_guard<std::mutex> g_fs{fs.mutex};
         l.unlock();
+        std::lock_guard<std::mutex> g_fs{fs.mutex};
+
         if (!inode.nlookup) {
             debug_print("forget: cleaning up inode {}", inode.src_ino);
             fs.inodes.erase({inode.src_ino, inode.src_dev});
@@ -192,6 +196,26 @@ static void sfs_setattr(fuse_req_t req, fuse_ino_t ino, struct stat *attr, int v
     int ifd = inode.fd;
     int res = 0;
 
+    if (valid & FUSE_SET_ATTR_MODE) {
+        res = with_fd_path(ifd,
+                           [attr](const char *procname) { return chmod(procname, attr->st_mode); });
+        if (res == -1) {
+            fuse_reply_err(req, errno);
+            return;
+        }
+    }
+
+    if (valid & (FUSE_SET_ATTR_UID | FUSE_SET_ATTR_GID)) {
+        uid_t u = (valid & FUSE_SET_ATTR_UID) ? attr->st_uid : static_cast<uid_t>(-1);
+        gid_t g = (valid & FUSE_SET_ATTR_GID) ? attr->st_gid : static_cast<gid_t>(-1);
+
+        res = with_fd_path(ifd, [u, g](const char *procname) { return lchown(procname, u, g); });
+        if (res == -1) {
+            fuse_reply_err(req, errno);
+            return;
+        }
+    }
+
     if (valid & FUSE_SET_ATTR_SIZE) {
         std::unique_lock<std::mutex> g{inode.m};
 
@@ -228,6 +252,43 @@ static void sfs_setattr(fuse_req_t req, fuse_ino_t ino, struct stat *attr, int v
         g.unlock();
     }
 
+    if (valid & (FUSE_SET_ATTR_ATIME | FUSE_SET_ATTR_MTIME)) {
+        struct timespec tv[2];
+
+        tv[0].tv_sec = 0;
+        tv[0].tv_nsec = UTIME_OMIT;
+        tv[1].tv_sec = 0;
+        tv[1].tv_nsec = UTIME_OMIT;
+
+        if (valid & FUSE_SET_ATTR_ATIME) {
+            if (valid & FUSE_SET_ATTR_ATIME_NOW) {
+                tv[0].tv_nsec = UTIME_NOW;
+            } else {
+                tv[0] = attr->st_atim;
+            }
+        }
+
+        if (valid & FUSE_SET_ATTR_MTIME) {
+            if (valid & FUSE_SET_ATTR_MTIME_NOW) {
+                tv[1].tv_nsec = UTIME_NOW;
+            } else {
+                tv[1] = attr->st_mtim;
+            }
+        }
+
+        if (fi) {
+            res = futimens(fi->fh, tv);
+        } else {
+            std::string procname = std::format("/proc/self/fd/{}", ifd);
+            res = utimensat(AT_FDCWD, procname.c_str(), tv, 0);
+        }
+
+        if (res == -1) {
+            fuse_reply_err(req, errno);
+            return;
+        }
+    }
+
     return sfs_getattr(req, ino, fi);
 }
 
@@ -250,9 +311,29 @@ static void sfs_lookup(fuse_req_t req, fuse_ino_t parent, const char *name) {
 
 static void mknod_symlink(fuse_req_t req, fuse_ino_t parent, const char *name, mode_t mode,
                           dev_t rdev, const char *link) {
-    int res;
     Inode &inode_p = get_inode(parent);
 
+    if (fs.quota.is_enabled()) {
+        if (S_ISDIR(mode)) {
+            if (!fs.quota.reserve(0, fs.blocksize)) {
+                fuse_reply_err(req, ENOSPC);
+                return;
+            }
+        } else if (S_ISLNK(mode) && link) {
+            uint64_t link_size = strlen(link);
+            if (!fs.quota.reserve(0, link_size)) {
+                fuse_reply_err(req, ENOSPC);
+                return;
+            }
+        } else if (S_ISREG(mode)) {
+            if (!fs.quota.check_available(0)) {
+                fuse_reply_err(req, ENOSPC);
+                return;
+            }
+        }
+    }
+
+    int res;
     if (S_ISDIR(mode))
         res = mkdirat(inode_p.fd, name, mode);
     else if (S_ISLNK(mode))
@@ -262,6 +343,14 @@ static void mknod_symlink(fuse_req_t req, fuse_ino_t parent, const char *name, m
 
     int saverr = errno;
     if (res == -1) {
+        if (fs.quota.is_enabled()) {
+            if (S_ISDIR(mode)) {
+                fs.quota.release(fs.blocksize, 0);
+            } else if (S_ISLNK(mode) && link) {
+                fs.quota.release(strlen(link), 0);
+            }
+        }
+
         if (saverr == ENFILE || saverr == EMFILE)
             error_print("Reached maximum number of file descriptors.");
         fuse_reply_err(req, saverr);
@@ -319,9 +408,24 @@ static void sfs_link(fuse_req_t req, fuse_ino_t ino, fuse_ino_t parent, const ch
 
 static void sfs_rmdir(fuse_req_t req, fuse_ino_t parent, const char *name) {
     Inode &inode_p = get_inode(parent);
+
+    uint64_t dir_size = 0;
+    if (fs.quota.is_enabled()) {
+        struct stat st;
+        if (fstatat(inode_p.fd, name, &st, AT_SYMLINK_NOFOLLOW) == 0) {
+            dir_size = st.st_size;
+        }
+    }
+
     std::lock_guard<std::mutex> g{inode_p.m};
     auto res = unlinkat(inode_p.fd, name, AT_REMOVEDIR);
-    fuse_reply_err(req, res == -1 ? errno : 0);
+    if (res == -1) {
+        fuse_reply_err(req, errno);
+    } else {
+        if (dir_size > 0)
+            fs.quota.release(dir_size, 0);
+        fuse_reply_err(req, 0);
+    }
 }
 
 static void sfs_rename(fuse_req_t req, fuse_ino_t parent, const char *name, fuse_ino_t newparent,
@@ -332,8 +436,25 @@ static void sfs_rename(fuse_req_t req, fuse_ino_t parent, const char *name, fuse
         fuse_reply_err(req, EINVAL);
         return;
     }
+
+    uint64_t victim_size = 0;
+    nlink_t victim_nlink = 0;
+    if (fs.quota.is_enabled()) {
+        struct stat st;
+        if (fstatat(inode_np.fd, newname, &st, AT_SYMLINK_NOFOLLOW) == 0) {
+            victim_size = st.st_size;
+            victim_nlink = st.st_nlink;
+        }
+    }
+
     auto res = renameat(inode_p.fd, name, inode_np.fd, newname);
-    fuse_reply_err(req, res == -1 ? errno : 0);
+    if (res == -1) {
+        fuse_reply_err(req, errno);
+    } else {
+        if (victim_size > 0 && victim_nlink == 1)
+            fs.quota.release(victim_size, 0);
+        fuse_reply_err(req, 0);
+    }
 }
 
 static void sfs_unlink(fuse_req_t req, fuse_ino_t parent, const char *name) {
@@ -346,9 +467,22 @@ static void sfs_unlink(fuse_req_t req, fuse_ino_t parent, const char *name) {
         return;
     }
 
+    auto res = unlinkat(inode_p.fd, name, 0);
+    if (res == -1) {
+        forget_one(e.ino, 1);
+        fuse_reply_err(req, errno);
+        return;
+    }
+
     if (fs.quota.is_enabled() && e.attr.st_nlink == 1) {
-        fs.quota.release(e.attr.st_size, 0);
-        debug_print("QUOTA: Reclaimed {} bytes from unlink", e.attr.st_size);
+        Inode &inode = get_inode(e.ino);
+        std::lock_guard<std::mutex> g{inode.m};
+        uint64_t size = inode.known_size;
+        if (S_ISLNK(e.attr.st_mode)) {
+            size = e.attr.st_size;
+        }
+        fs.quota.release(size, 0);
+        debug_print("QUOTA: Reclaimed {} bytes from unlink", size);
     }
 
     if (!fs.timeout) {
@@ -366,8 +500,7 @@ static void sfs_unlink(fuse_req_t req, fuse_ino_t parent, const char *name) {
 
     forget_one(e.ino, 1);
 
-    auto res = unlinkat(inode_p.fd, name, 0);
-    fuse_reply_err(req, res == -1 ? errno : 0);
+    fuse_reply_err(req, 0);
 }
 
 static void sfs_forget(fuse_req_t req, fuse_ino_t ino, uint64_t nlookup) {
@@ -561,10 +694,33 @@ static void sfs_create(fuse_req_t req, fuse_ino_t parent, const char *name, mode
     debug_print("sfs_create: parent ino {}, name '{}', mode {:o}, flags {:o}", parent, name, mode,
                 fi->flags);
 
+    uint64_t old_file_size = 0;
+    bool truncating_existing = false;
+
+    if (fs.quota.is_enabled()) {
+        if (fi->flags & O_TRUNC) {
+            struct stat st;
+            if (fstatat(inode_p.fd, name, &st, AT_SYMLINK_NOFOLLOW) == 0 && S_ISREG(st.st_mode)) {
+                old_file_size = st.st_size;
+                truncating_existing = true;
+            }
+        }
+
+        if (!truncating_existing && !fs.quota.check_available(0)) {
+            fuse_reply_err(req, ENOSPC);
+            return;
+        }
+    }
+
     int fd = openat(inode_p.fd, name, (fi->flags | O_CREAT) & ~O_NOFOLLOW, mode);
     if (fd == -1) {
         fuse_reply_err(req, errno);
         return;
+    }
+
+    if (truncating_existing && old_file_size > 0) {
+        fs.quota.release(old_file_size, 0);
+        debug_print("QUOTA: Released {} bytes from O_TRUNC in create", old_file_size);
     }
 
     enforce_ownership(inode_p.fd, name, fd);
@@ -573,6 +729,7 @@ static void sfs_create(fuse_req_t req, fuse_ino_t parent, const char *name, mode
     fuse_entry_param e;
     auto err = do_lookup(parent, name, &e);
     if (err) {
+        close(fd);
         fuse_reply_err(req, err);
         return;
     }
@@ -581,6 +738,10 @@ static void sfs_create(fuse_req_t req, fuse_ino_t parent, const char *name, mode
     std::lock_guard<std::mutex> g{inode.m};
     inode.nopen++;
 
+    if (truncating_existing) {
+        inode.known_size = 0;
+    }
+
     sfs_create_open_flags(fi);
 
     fuse_reply_create(req, &e, fi);
@@ -588,6 +749,12 @@ static void sfs_create(fuse_req_t req, fuse_ino_t parent, const char *name, mode
 
 static void sfs_open(fuse_req_t req, fuse_ino_t ino, fuse_file_info *fi) {
     Inode &inode = get_inode(ino);
+
+    uint64_t trunc_release = 0;
+    if (fs.quota.is_enabled() && (fi->flags & O_TRUNC)) {
+        std::lock_guard<std::mutex> g{inode.m};
+        trunc_release = inode.known_size;
+    }
 
     if (fs.timeout && (fi->flags & O_ACCMODE) == O_WRONLY) {
         fi->flags &= ~O_ACCMODE;
@@ -604,10 +771,19 @@ static void sfs_open(fuse_req_t req, fuse_ino_t ino, fuse_file_info *fi) {
         return;
     }
 
+    if (trunc_release > 0) {
+        fs.quota.release(trunc_release, 0);
+        debug_print("QUOTA: Released {} bytes from O_TRUNC in open", trunc_release);
+    }
+
     enforce_ownership(-1, nullptr, fd);
 
     std::lock_guard<std::mutex> g{inode.m};
     inode.nopen++;
+
+    if (trunc_release > 0)
+        inode.known_size = 0;
+
     sfs_create_open_flags(fi);
     fi->fh = fd;
 
@@ -702,10 +878,26 @@ static void sfs_write_buf(fuse_req_t req, fuse_ino_t ino, fuse_bufvec *in_buf, o
 
     if (res < 0) {
         if (reserved) {
+            std::lock_guard<std::mutex> g{inode.m};
+            inode.known_size = pre_write_size;
             fs.quota.release(pre_write_size + amount_reserved, pre_write_size);
         }
         fuse_reply_err(req, -res);
     } else {
+        if (reserved) {
+            uint64_t actual_end = off + static_cast<uint64_t>(res);
+            if (actual_end < write_end) {
+                std::lock_guard<std::mutex> g{inode.m};
+
+                if (inode.known_size == write_end) {
+                    uint64_t corrected = std::max(pre_write_size, actual_end);
+                    if (corrected < write_end) {
+                        fs.quota.release(write_end, corrected);
+                        inode.known_size = corrected;
+                    }
+                }
+            }
+        }
         fuse_reply_write(req, (size_t)res);
     }
 }
@@ -760,8 +952,12 @@ static void sfs_fallocate(fuse_req_t req, fuse_ino_t ino, int mode, off_t offset
         err = errno;
 
     if (err != 0) {
-        if (reserved)
+        if (reserved) {
+            std::lock_guard<std::mutex> g2{inode.m};
+            if (inode.known_size == end)
+                inode.known_size = current;
             fs.quota.release(end, current);
+        }
         fuse_reply_err(req, err);
     } else {
         fuse_reply_err(req, 0);
@@ -783,8 +979,6 @@ static void sfs_getxattr(fuse_req_t req, fuse_ino_t ino, const char *name, size_
         ssize_t ret = getxattr(procname.c_str(), name, value.data(), size);
         if (ret == -1)
             fuse_reply_err(req, errno);
-        else if (ret == 0)
-            fuse_reply_err(req, 0);
         else
             fuse_reply_buf(req, value.data(), ret);
     } else {
@@ -805,8 +999,6 @@ static void sfs_listxattr(fuse_req_t req, fuse_ino_t ino, size_t size) {
         ssize_t ret = listxattr(procname.c_str(), value.data(), size);
         if (ret == -1)
             fuse_reply_err(req, errno);
-        else if (ret == 0)
-            fuse_reply_err(req, 0);
         else
             fuse_reply_buf(req, value.data(), ret);
     } else {

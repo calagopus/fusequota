@@ -13,6 +13,8 @@ class QuotaManager {
     bool reserve(uint64_t current_file_size, uint64_t new_file_size);
     void release(uint64_t current_file_size, uint64_t new_file_size);
 
+    bool check_available(uint64_t bytes) const;
+
     uint64_t get_usage() const {
         return used_bytes.load();
     }
