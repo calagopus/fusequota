@@ -2,12 +2,7 @@
 
 ## Supported Versions
 
-The following versions of Calagopus panel are currently receiving security updates:
-
-| Version | Supported              |
-|---------|------------------------|
-| 1.0.x   | :white_check_mark: Yes |
-| < 1.0.0 | :x: No                 |
+The latest version of FuseQuota will receive security updates.
 
 > **Note:** If a reported vulnerability cannot be reproduced on the oldest supported version, it may not be considered valid. However, depending on the nature and impact of the issue, we may still publish a security advisory to inform users of older versions.
 
