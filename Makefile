@@ -35,8 +35,7 @@ install: all
 clean:
 	@echo "--- Cleaning Build Files ---"
 	rm -rf $(BUILD_DIR)
-	@# Optional: clean libfuse build as well
-	@# rm -rf external/libfuse/build
+	rm -rf external/libfuse/build
 
 FORMAT_SOURCES := $(shell find src -name "*.cpp" -o -name "*.hpp")
 

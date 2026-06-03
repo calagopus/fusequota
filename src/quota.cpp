@@ -43,12 +43,8 @@ void QuotaManager::calculate_usage(std::stop_token st) {
                 continue;
             seen_inodes.insert(id);
 
-            if (entry.is_regular_file()) {
-                total += file_stat.st_size;
-            } else if (entry.is_directory()) {
-                total += file_stat.st_size;
-            } else if (entry.is_symlink()) {
-                total += file_stat.st_size;
+            if (entry.is_regular_file() || entry.is_directory() || entry.is_symlink()) {
+                total += file_stat.st_blocks * 512;
             }
         }
 

@@ -12,6 +12,7 @@ template <> struct std::hash<SrcId> {
 
 struct Inode {
     int fd{-1};
+    bool unlinked = false;
     dev_t src_dev{0};
     ino_t src_ino{0};
     int generation{0};
@@ -20,7 +21,7 @@ struct Inode {
     std::atomic<uint64_t> nlookup{0};
     std::mutex m;
 
-    std::atomic<uint64_t> known_size{0};
+    std::atomic<uint64_t> known_physical_size{0};
     int stop_timeout_secs{60};
 
     Inode() = default;
