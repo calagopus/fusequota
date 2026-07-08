@@ -7,16 +7,26 @@ RUN apk add --no-cache \
     meson \
     ninja \
     linux-headers \
-    pkgconf
+    pkgconf \
+    patch \
+    liburing-dev \
+    mimalloc2-dev
 
 WORKDIR /app
 
 COPY . .
 
+RUN if patch -R -p1 -d external/libfuse -s -f --dry-run -i /app/patches/libfuse-fixes.patch >/dev/null 2>&1; then \
+        echo "libfuse patches already applied"; \
+    else \
+        patch -p1 -d external/libfuse -i /app/patches/libfuse-fixes.patch; \
+    fi
+
 RUN rm -rf external/libfuse/build && \
     meson setup external/libfuse external/libfuse/build \
         --default-library=static \
         --prefix=/usr \
+        -Db_lto=true \
         -Dexamples=false \
         -Dtests=false \
         -Dutils=false && \
@@ -27,7 +37,7 @@ WORKDIR /app/build
 
 RUN cmake .. \
     -DCMAKE_BUILD_TYPE=Release \
-    -DCMAKE_CXX_FLAGS="-Os -ffunction-sections -fdata-sections" \
+    -DCMAKE_CXX_FLAGS="-O2 -ffunction-sections -fdata-sections" \
     -DCMAKE_EXE_LINKER_FLAGS="-static -static-libstdc++ -static-libgcc -Wl,--gc-sections" \
     && make -j$(nproc)
 

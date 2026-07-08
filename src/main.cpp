@@ -102,6 +102,13 @@ int main(int argc, char *argv[]) {
         errx(1, "ERROR: source is not a directory");
     fs.src_dev = statbuf.st_dev;
 
+    struct rlimit nofile;
+    if (getrlimit(RLIMIT_NOFILE, &nofile) == 0 && nofile.rlim_cur < nofile.rlim_max) {
+        nofile.rlim_cur = nofile.rlim_max;
+        if (setrlimit(RLIMIT_NOFILE, &nofile) == -1)
+            error_print("WARNING: failed to raise RLIMIT_NOFILE: {}", errno);
+    }
+
     fs.root.fd = open(fs.source.c_str(), O_PATH);
     if (fs.root.fd == -1)
         err(1, "ERROR: open source");

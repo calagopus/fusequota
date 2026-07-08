@@ -1,0 +1,61 @@
+diff --git a/lib/fuse_uring.c b/lib/fuse_uring.c
+index 22e31494..54893d92 100644
+--- a/lib/fuse_uring.c
++++ b/lib/fuse_uring.c
+@@ -536,10 +536,39 @@ static int fuse_uring_register_queue(struct fuse_ring_queue *queue)
+ 	return 0;
+ }
+ 
++/*
++ * The kernel creates one ring queue per possible CPU (num_possible_cpus())
++ * and requests stall until every queue is registered. get_nprocs_conf()
++ * under-counts when the affinity mask or sysfs is restricted (musl honors
++ * the mask; lxcfs masks the cpu dirs in containers), so derive the count
++ * from cpu/possible, which the kernel does not virtualize.
++ */
++static size_t fuse_uring_nr_queues(void)
++{
++	int nprocs = get_nprocs_conf();
++	long max_cpu = -1;
++	FILE *fp = fopen("/sys/devices/system/cpu/possible", "re");
++
++	if (fp != NULL) {
++		char buf[256];
++
++		if (fgets(buf, sizeof(buf), fp) != NULL) {
++			char *last = strrchr(buf, '-');
++
++			if (last == NULL)
++				last = strrchr(buf, ',');
++			max_cpu = strtol(last != NULL ? last + 1 : buf, NULL, 10);
++		}
++		fclose(fp);
++	}
++
++	return max_cpu + 1 > nprocs ? (size_t)(max_cpu + 1) : (size_t)nprocs;
++}
++
+ static struct fuse_ring_pool *fuse_create_ring(struct fuse_session *se)
+ {
+ 	struct fuse_ring_pool *fuse_ring = NULL;
+-	const size_t nr_queues = get_nprocs_conf();
++	const size_t nr_queues = fuse_uring_nr_queues();
+ 	size_t payload_sz = se->bufsize - FUSE_BUFFER_HEADER_SIZE;
+ 	size_t queue_sz;
+ 
+@@ -781,8 +810,13 @@ static void *alloc_local(size_t size)
+ 	if (p == MAP_FAILED)
+ 		return NULL;
+ 	syscall(SYS_mbind, p, size, MPOL_LOCAL, NULL, 0, 0);
+-	if (madvise(p, size, MADV_POPULATE_WRITE) < 0)
+-		return NULL;
++	/*
++	 * No MADV_POPULATE_WRITE: pre-faulting commits
++	 * nr_queues * q_depth * max_write bytes (hundreds of MB) per mount
++	 * even for idle queues. Lazy faulting keeps RSS proportional to the
++	 * buffers actually used, which matters when running one daemon per
++	 * volume.
++	 */
+ 	return p;
+ }
+ 

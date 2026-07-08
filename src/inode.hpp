@@ -22,6 +22,7 @@ struct Inode {
     std::mutex m;
 
     std::atomic<uint64_t> known_physical_size{0};
+    uint64_t quota_headroom{0};
     int stop_timeout_secs{60};
 
     Inode() = default;

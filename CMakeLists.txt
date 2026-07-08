@@ -18,7 +18,8 @@ if(NOT CMAKE_BUILD_TYPE)
   set(CMAKE_BUILD_TYPE Release)
 endif()
 
-set(CMAKE_EXE_LINKER_FLAGS "-static")
+string(APPEND CMAKE_EXE_LINKER_FLAGS " -static")
+set(CMAKE_FIND_LIBRARY_SUFFIXES ".a")
 
 find_package(PkgConfig REQUIRED)
 set(ENV{PKG_CONFIG_PATH} "${CMAKE_SOURCE_DIR}/external/libfuse/build/meson-uninstalled:$ENV{PKG_CONFIG_PATH}")
@@ -37,16 +38,29 @@ add_executable(fusequota
     src/socket_server.cpp
 )
 
-target_link_libraries(fusequota PRIVATE 
+find_library(MIMALLOC_STATIC_LIB NAMES libmimalloc.a)
+if(MIMALLOC_STATIC_LIB)
+    message(STATUS "Linking mimalloc: ${MIMALLOC_STATIC_LIB}")
+    target_link_libraries(fusequota PRIVATE
+        -Wl,--whole-archive ${MIMALLOC_STATIC_LIB} -Wl,--no-whole-archive)
+endif()
+
+target_link_libraries(fusequota PRIVATE
     ${FUSE3_STATIC_LIB}
     Threads::Threads
     dl
     m
 )
 
+find_library(URING_STATIC_LIB NAMES liburing.a)
+if(URING_STATIC_LIB)
+    message(STATUS "Linking liburing for fuse-over-io-uring")
+    target_link_libraries(fusequota PRIVATE ${URING_STATIC_LIB})
+endif()
+
 target_compile_options(fusequota PRIVATE 
     $<$<OR:$<CONFIG:Release>,$<CONFIG:RelWithDebInfo>>:
-        -Os
+        -O2
         -ffunction-sections
         -fdata-sections
         -fno-rtti

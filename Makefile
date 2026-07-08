@@ -2,7 +2,7 @@ BUILD_DIR := build
 INSTALL_DIR := /usr/local/bin
 TARGET_NAME := fusequota
 
-.PHONY: all musl clean install libfuse help
+.PHONY: all musl clean install libfuse libfuse-patches help
 
 all: libfuse $(BUILD_DIR)/Makefile
 	@echo "--- Building Project ---"
@@ -14,7 +14,15 @@ musl: Dockerfile.musl
 	DOCKER_BUILDKIT=1 docker build -f Dockerfile.musl --output build/ .
 	@echo "Success! Binary is at: build/fusequota_musl"
 
-libfuse:
+libfuse-patches:
+	@if git -C external/libfuse apply --reverse --check ../../patches/libfuse-fixes.patch 2>/dev/null; then \
+		echo "--- libfuse patches already applied ---"; \
+	else \
+		echo "--- Applying libfuse patches ---"; \
+		git -C external/libfuse apply ../../patches/libfuse-fixes.patch; \
+	fi
+
+libfuse: libfuse-patches
 	@echo "--- Building libfuse (Static) ---"
 	@if [ ! -d "external/libfuse/build" ]; then \
 		meson setup external/libfuse external/libfuse/build --default-library=static; \

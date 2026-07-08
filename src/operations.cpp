@@ -12,6 +12,58 @@ static int get_fs_fd(fuse_ino_t ino) {
     return get_inode(ino).fd;
 }
 
+static constexpr uint64_t QUOTA_HEADROOM_CHUNK = 1 << 20;
+
+static int quota_grow_tracked(Inode &inode, uint64_t new_end) {
+    uint64_t size = inode.known_physical_size.load(std::memory_order_relaxed);
+    if (new_end <= size)
+        return 0;
+
+    uint64_t need = new_end - size;
+    if (inode.quota_headroom < need) {
+        uint64_t want = std::max(need - inode.quota_headroom, QUOTA_HEADROOM_CHUNK);
+        if (!fs.quota.reserve_bytes(want)) {
+            // Near the limit a full chunk may not fit; retry with the exact
+            // remainder so we don't reject writes that would still fit.
+            want = need - inode.quota_headroom;
+            if (!fs.quota.reserve_bytes(want))
+                return ENOSPC;
+        }
+        inode.quota_headroom += want;
+    }
+    inode.quota_headroom -= need;
+    inode.known_physical_size.store(new_end, std::memory_order_relaxed);
+    return 0;
+}
+
+static void quota_shrink_tracked(Inode &inode, uint64_t new_size) {
+    uint64_t size = inode.known_physical_size.load(std::memory_order_relaxed);
+    if (new_size < size) {
+        fs.quota.release_bytes(size - new_size);
+        inode.known_physical_size.store(new_size, std::memory_order_relaxed);
+    }
+}
+
+static void quota_return_headroom(Inode &inode) {
+    if (inode.quota_headroom) {
+        fs.quota.release_bytes(inode.quota_headroom);
+        inode.quota_headroom = 0;
+    }
+}
+
+// Un-consume bytes back into headroom (failed or short write)
+static void quota_ungrow_tracked(Inode &inode, uint64_t from_end, uint64_t to_end) {
+    uint64_t size = inode.known_physical_size.load(std::memory_order_relaxed);
+    if (size != from_end || to_end >= from_end)
+        return;
+    inode.quota_headroom += from_end - to_end;
+    inode.known_physical_size.store(to_end, std::memory_order_relaxed);
+    if (inode.quota_headroom > QUOTA_HEADROOM_CHUNK) {
+        fs.quota.release_bytes(inode.quota_headroom - QUOTA_HEADROOM_CHUNK);
+        inode.quota_headroom = QUOTA_HEADROOM_CHUNK;
+    }
+}
+
 static int with_fd_path(int fd, const std::function<int(const char *)> &f) {
 #ifdef __FreeBSD__
     struct kinfo_file kf;
@@ -78,11 +130,14 @@ static void forget_one(fuse_ino_t ino, uint64_t n) {
 
     if (!inode.nlookup) {
         l.unlock();
-        std::lock_guard<std::mutex> g_fs{fs.mutex};
+        SrcId id{inode.src_ino, inode.src_dev};
+        InodeShard &shard = fs.shard_for(id);
+        std::lock_guard<std::mutex> g_fs{shard.mutex};
 
         if (!inode.nlookup) {
             debug_print("forget: cleaning up inode {}", inode.src_ino);
-            fs.inodes.erase({inode.src_ino, inode.src_dev});
+            quota_return_headroom(inode);
+            shard.inodes.erase(id);
         }
     }
 }
@@ -113,11 +168,12 @@ static int do_lookup(fuse_ino_t parent, const char *name, fuse_entry_param *e) {
     }
 
     SrcId id{e->attr.st_ino, e->attr.st_dev};
-    std::unique_lock<std::mutex> fs_lock{fs.mutex};
+    InodeShard &shard = fs.shard_for(id);
+    std::unique_lock<std::mutex> fs_lock{shard.mutex};
 
     Inode *inode_p;
     try {
-        inode_p = &fs.inodes[id];
+        inode_p = &shard.inodes[id];
     } catch (const std::bad_alloc &) {
         return ENOMEM;
     }
@@ -125,8 +181,6 @@ static int do_lookup(fuse_ino_t parent, const char *name, fuse_entry_param *e) {
     e->ino = reinterpret_cast<fuse_ino_t>(inode_p);
     Inode &inode{*inode_p};
     e->generation = inode.generation;
-
-    inode.known_physical_size = e->attr.st_blocks * 512;
 
     if (inode.fd == -ENOENT) {
         debug_print("lookup(): inode {} recycled; generation={}", e->attr.st_ino, inode.generation);
@@ -141,6 +195,7 @@ static int do_lookup(fuse_ino_t parent, const char *name, fuse_entry_param *e) {
         std::lock_guard<std::mutex> g{inode.m};
         inode.src_ino = e->attr.st_ino;
         inode.src_dev = e->attr.st_dev;
+        inode.known_physical_size.store(e->attr.st_blocks * 512, std::memory_order_relaxed);
         inode.nlookup++;
         inode.fd = newfd.release();
         fs_lock.unlock();
@@ -172,6 +227,8 @@ static void sfs_init(void *userdata, fuse_conn_info *conn) {
     }
 
     fuse_set_feature_flag(conn, FUSE_CAP_NO_EXPORT_SUPPORT);
+    fuse_set_feature_flag(conn, FUSE_CAP_PARALLEL_DIROPS);
+    fuse_set_feature_flag(conn, FUSE_CAP_CACHE_SYMLINKS);
     conn->no_interrupt = 1;
     conn->max_readahead = 4 * 1024 * 1024;
     conn->max_write = 4 * 1024 * 1024;
@@ -219,16 +276,12 @@ static void sfs_setattr(fuse_req_t req, fuse_ino_t ino, struct stat *attr, int v
     if (valid & FUSE_SET_ATTR_SIZE) {
         std::unique_lock<std::mutex> g{inode.m};
 
-        uint64_t old_size = inode.known_physical_size;
-        uint64_t new_size = attr->st_blocks * 512;
-        bool quota_changed = false;
+        uint64_t old_size = inode.known_physical_size.load(std::memory_order_relaxed);
+        uint64_t new_size = attr->st_size;
 
-        if (new_size > old_size) {
-            if (!fs.quota.reserve(old_size, new_size)) {
-                fuse_reply_err(req, ENOSPC);
-                return;
-            }
-            quota_changed = true;
+        if (new_size > old_size && quota_grow_tracked(inode, new_size) != 0) {
+            fuse_reply_err(req, ENOSPC);
+            return;
         }
 
         if (fi) {
@@ -239,16 +292,14 @@ static void sfs_setattr(fuse_req_t req, fuse_ino_t ino, struct stat *attr, int v
         }
 
         if (res == -1) {
-            if (quota_changed)
-                fs.quota.release(new_size, old_size);
+            if (new_size > old_size)
+                quota_ungrow_tracked(inode, new_size, old_size);
             fuse_reply_err(req, errno);
             return;
         }
 
         if (new_size < old_size)
-            fs.quota.release(old_size, new_size);
-
-        inode.known_physical_size = new_size;
+            quota_shrink_tracked(inode, new_size);
         g.unlock();
     }
 
@@ -417,7 +468,6 @@ static void sfs_rmdir(fuse_req_t req, fuse_ino_t parent, const char *name) {
         }
     }
 
-    std::lock_guard<std::mutex> g{inode_p.m};
     auto res = unlinkat(inode_p.fd, name, AT_REMOVEDIR);
     if (res == -1) {
         fuse_reply_err(req, errno);
@@ -460,58 +510,52 @@ static void sfs_rename(fuse_req_t req, fuse_ino_t parent, const char *name, fuse
 static void sfs_unlink(fuse_req_t req, fuse_ino_t parent, const char *name) {
     Inode &inode_p = get_inode(parent);
 
-    fuse_entry_param e;
-    auto err = do_lookup(parent, name, &e);
-    if (err) {
-        fuse_reply_err(req, err);
-        return;
+    struct stat st;
+    bool have_st = false;
+    if (fs.quota.is_enabled() || !fs.timeout) {
+        have_st = fstatat(inode_p.fd, name, &st, AT_SYMLINK_NOFOLLOW) == 0;
+        if (!have_st) {
+            fuse_reply_err(req, errno);
+            return;
+        }
     }
 
-    auto res = unlinkat(inode_p.fd, name, 0);
-    if (res == -1) {
-        forget_one(e.ino, 1);
+    if (unlinkat(inode_p.fd, name, 0) == -1) {
         fuse_reply_err(req, errno);
         return;
     }
 
-    if (fs.quota.is_enabled() && e.attr.st_nlink == 1) {
-        Inode &inode = get_inode(e.ino);
+    if (have_st && st.st_nlink == 1) {
+        SrcId id{st.st_ino, st.st_dev};
+        InodeShard &shard = fs.shard_for(id);
+        std::lock_guard<std::mutex> shard_lock{shard.mutex};
+        auto it = shard.inodes.find(id);
+        Inode *inode = it != shard.inodes.end() ? &it->second : nullptr;
 
-        if (S_ISLNK(e.attr.st_mode)) {
-            uint64_t size = e.attr.st_blocks * 512;
-            if (size > 0) {
-                fs.quota.release(size, 0);
-                debug_print("QUOTA: Reclaimed {} bytes from unlink (symlink)", size);
-            }
-        } else {
-            std::lock_guard<std::mutex> g{inode.m};
-            inode.unlinked = true;
-            if (inode.nopen == 0) {
-                uint64_t size = inode.known_physical_size.exchange(0, std::memory_order_relaxed);
-                if (size > 0) {
-                    fs.quota.release(size, 0);
-                    debug_print("QUOTA: Reclaimed {} bytes from unlink", size);
-                }
+        if (fs.quota.is_enabled()) {
+            if (!inode || S_ISLNK(st.st_mode)) {
+                fs.quota.release_bytes(static_cast<uint64_t>(st.st_blocks) * 512);
             } else {
-                debug_print("QUOTA: unlink reclaim deferred, {} handle(s) open", inode.nopen);
+                std::lock_guard<std::mutex> g{inode->m};
+                inode->unlinked = true;
+                if (inode->nopen == 0) {
+                    quota_shrink_tracked(*inode, 0);
+                    quota_return_headroom(*inode);
+                } else {
+                    debug_print("QUOTA: unlink reclaim deferred, {} handle(s) open", inode->nopen);
+                }
+            }
+        }
+
+        if (!fs.timeout && inode) {
+            std::lock_guard<std::mutex> g{inode->m};
+            if (inode->fd > 0 && !inode->nopen) {
+                close(inode->fd);
+                inode->fd = -ENOENT;
+                inode->generation++;
             }
         }
     }
-
-    if (!fs.timeout) {
-        if (e.attr.st_nlink == 1) {
-            Inode &inode = get_inode(e.ino);
-            std::lock_guard<std::mutex> g{inode.m};
-            if (inode.fd > 0 && !inode.nopen) {
-                std::lock_guard<std::mutex> g_fs{fs.mutex};
-                close(inode.fd);
-                inode.fd = -ENOENT;
-                inode.generation++;
-            }
-        }
-    }
-
-    forget_one(e.ino, 1);
 
     fuse_reply_err(req, 0);
 }
@@ -731,11 +775,6 @@ static void sfs_create(fuse_req_t req, fuse_ino_t parent, const char *name, mode
         return;
     }
 
-    if (truncating_existing && old_file_size > 0) {
-        fs.quota.release(old_file_size, 0);
-        debug_print("QUOTA: Released {} bytes from O_TRUNC in create", old_file_size);
-    }
-
     enforce_ownership(inode_p.fd, name, fd);
 
     fi->fh = fd;
@@ -752,7 +791,11 @@ static void sfs_create(fuse_req_t req, fuse_ino_t parent, const char *name, mode
     inode.nopen++;
 
     if (truncating_existing) {
-        inode.known_physical_size = 0;
+        uint64_t charged = inode.known_physical_size.load(std::memory_order_relaxed);
+        fs.quota.release_bytes(std::max(charged, old_file_size));
+        inode.known_physical_size.store(0, std::memory_order_relaxed);
+        debug_print("QUOTA: Released {} bytes from O_TRUNC in create",
+                    std::max(charged, old_file_size));
     }
 
     sfs_create_open_flags(fi);
@@ -780,18 +823,12 @@ static void sfs_open(fuse_req_t req, fuse_ino_t ino, fuse_file_info *fi) {
         return;
     }
 
-    if (will_truncate) {
-        uint64_t freed = inode.known_physical_size.exchange(0, std::memory_order_relaxed);
-        if (freed > 0) {
-            fs.quota.release(freed, 0);
-            debug_print("QUOTA: Released {} bytes from O_TRUNC in open", freed);
-        }
-    }
-
     enforce_ownership(-1, nullptr, fd);
 
     {
         std::lock_guard<std::mutex> g{inode.m};
+        if (will_truncate)
+            quota_shrink_tracked(inode, 0);
         inode.nopen++;
     }
 
@@ -805,19 +842,32 @@ static void sfs_open(fuse_req_t req, fuse_ino_t ino, fuse_file_info *fi) {
 
 static void sfs_release(fuse_req_t req, fuse_ino_t ino, fuse_file_info *fi) {
     Inode &inode = get_inode(ino);
-    std::lock_guard<std::mutex> g{inode.m};
-    inode.nopen--;
+    {
+        std::lock_guard<std::mutex> g{inode.m};
+        inode.nopen--;
 
-    if (inode.backing_id && !inode.nopen) {
-        fuse_passthrough_close(req, inode.backing_id);
-        inode.backing_id = 0;
-    }
+        if (inode.backing_id && !inode.nopen) {
+            fuse_passthrough_close(req, inode.backing_id);
+            inode.backing_id = 0;
+        }
 
-    if (fs.quota.is_enabled() && inode.unlinked && inode.nopen == 0) {
-        uint64_t size = inode.known_physical_size.exchange(0, std::memory_order_relaxed);
-        if (size > 0) {
-            fs.quota.release(size, 0);
-            debug_print("QUOTA: Reclaimed {} bytes from deferred unlink", size);
+        if (fs.quota.is_enabled() && inode.nopen == 0) {
+            if (inode.unlinked) {
+                quota_shrink_tracked(inode, 0);
+            } else {
+                struct stat st;
+                if (fstat(fi->fh, &st) == 0 && S_ISREG(st.st_mode)) {
+                    uint64_t real = static_cast<uint64_t>(st.st_blocks) * 512;
+                    uint64_t tracked = inode.known_physical_size.load(std::memory_order_relaxed);
+                    if (real > tracked) {
+                        fs.quota.force_add(real - tracked);
+                        inode.known_physical_size.store(real, std::memory_order_relaxed);
+                    } else if (real < tracked && real >= static_cast<uint64_t>(st.st_size)) {
+                        quota_shrink_tracked(inode, real);
+                    }
+                }
+            }
+            quota_return_headroom(inode);
         }
     }
 
@@ -855,7 +905,8 @@ static void sfs_read(fuse_req_t req, fuse_ino_t ino, size_t size, off_t off, fus
         }
         buf.buf[0].size = res;
     } else {
-        buf.buf[0].flags = static_cast<fuse_buf_flags>(FUSE_BUF_IS_FD | FUSE_BUF_FD_SEEK);
+        buf.buf[0].flags =
+            static_cast<fuse_buf_flags>(FUSE_BUF_IS_FD | FUSE_BUF_FD_SEEK | FUSE_BUF_FD_RETRY);
         buf.buf[0].fd = fi->fh;
         buf.buf[0].pos = off;
     }
@@ -872,27 +923,22 @@ static void sfs_write_buf(fuse_req_t req, fuse_ino_t ino, fuse_bufvec *in_buf, o
     bool reserved = false;
     uint64_t reserved_from = 0;
 
-    if (fs.quota.is_enabled()) {
-        uint64_t pre = inode.known_physical_size.load(std::memory_order_relaxed);
-        while (write_end > pre) {
-            if (!fs.quota.reserve(pre, write_end)) {
+    if (fs.quota.is_enabled() &&
+        write_end > inode.known_physical_size.load(std::memory_order_relaxed)) {
+        std::lock_guard<std::mutex> g{inode.m};
+        reserved_from = inode.known_physical_size.load(std::memory_order_relaxed);
+        if (write_end > reserved_from) {
+            if (quota_grow_tracked(inode, write_end) != 0) {
                 fuse_reply_err(req, ENOSPC);
                 return;
             }
-            uint64_t reserved_against = pre;
-            if (inode.known_physical_size.compare_exchange_weak(pre, write_end,
-                                                                std::memory_order_relaxed)) {
-                reserved = true;
-                reserved_from = reserved_against;
-                break;
-            }
-
-            fs.quota.release(write_end, reserved_against);
+            reserved = true;
         }
     }
 
     fuse_bufvec out_buf = FUSE_BUFVEC_INIT(size);
-    out_buf.buf[0].flags = static_cast<fuse_buf_flags>(FUSE_BUF_IS_FD | FUSE_BUF_FD_SEEK);
+    out_buf.buf[0].flags =
+        static_cast<fuse_buf_flags>(FUSE_BUF_IS_FD | FUSE_BUF_FD_SEEK | FUSE_BUF_FD_RETRY);
     out_buf.buf[0].fd = fi->fh;
     out_buf.buf[0].pos = off;
 
@@ -900,22 +946,16 @@ static void sfs_write_buf(fuse_req_t req, fuse_ino_t ino, fuse_bufvec *in_buf, o
 
     if (res < 0) {
         if (reserved) {
-            uint64_t expected = write_end;
-            inode.known_physical_size.compare_exchange_strong(expected, reserved_from,
-                                                              std::memory_order_relaxed);
-            fs.quota.release(write_end, reserved_from);
+            std::lock_guard<std::mutex> g{inode.m};
+            quota_ungrow_tracked(inode, write_end, reserved_from);
         }
         fuse_reply_err(req, -res);
     } else {
         if (reserved) {
             uint64_t actual_end = off + static_cast<uint64_t>(res);
             if (actual_end < write_end) {
-                uint64_t corrected = std::max(reserved_from, actual_end);
-                uint64_t expected = write_end;
-                if (corrected < write_end && inode.known_physical_size.compare_exchange_strong(
-                                                 expected, corrected, std::memory_order_relaxed)) {
-                    fs.quota.release(write_end, corrected);
-                }
+                std::lock_guard<std::mutex> g{inode.m};
+                quota_ungrow_tracked(inode, write_end, std::max(reserved_from, actual_end));
             }
         }
         fuse_reply_write(req, (size_t)res);
@@ -953,17 +993,16 @@ static void sfs_fallocate(fuse_req_t req, fuse_ino_t ino, int mode, off_t offset
 
     std::unique_lock<std::mutex> g{inode.m};
 
-    uint64_t current = inode.known_physical_size;
+    uint64_t current = inode.known_physical_size.load(std::memory_order_relaxed);
     bool changing_size = !(mode & FALLOC_FL_KEEP_SIZE);
     bool reserved = false;
 
     if (changing_size && end > current) {
-        if (!fs.quota.reserve(current, end)) {
+        if (quota_grow_tracked(inode, end) != 0) {
             fuse_reply_err(req, ENOSPC);
             return;
         }
         reserved = true;
-        inode.known_physical_size = end;
     }
     g.unlock();
 
@@ -974,9 +1013,7 @@ static void sfs_fallocate(fuse_req_t req, fuse_ino_t ino, int mode, off_t offset
     if (err != 0) {
         if (reserved) {
             std::lock_guard<std::mutex> g2{inode.m};
-            if (inode.known_physical_size == end)
-                inode.known_physical_size = current;
-            fs.quota.release(end, current);
+            quota_ungrow_tracked(inode, end, current);
         }
         fuse_reply_err(req, err);
     } else {

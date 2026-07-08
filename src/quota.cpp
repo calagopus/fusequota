@@ -38,12 +38,14 @@ void QuotaManager::calculate_usage(std::stop_token st) {
             if (lstat(entry.path().c_str(), &file_stat) != 0)
                 continue;
 
-            SrcId id{file_stat.st_ino, file_stat.st_dev};
-            if (seen_inodes.find(id) != seen_inodes.end())
-                continue;
-            seen_inodes.insert(id);
+            if (file_stat.st_nlink > 1 && !S_ISDIR(file_stat.st_mode)) {
+                SrcId id{file_stat.st_ino, file_stat.st_dev};
+                if (!seen_inodes.insert(id).second)
+                    continue;
+            }
 
-            if (entry.is_regular_file() || entry.is_directory() || entry.is_symlink()) {
+            if (S_ISREG(file_stat.st_mode) || S_ISDIR(file_stat.st_mode) ||
+                S_ISLNK(file_stat.st_mode)) {
                 total += file_stat.st_blocks * 512;
             }
         }
@@ -93,42 +95,48 @@ void QuotaManager::background_scanner(std::stop_token st) {
     }
 }
 
-bool QuotaManager::reserve(uint64_t current_file_size, uint64_t new_file_size) {
-    if (!enabled)
-        return true;
-    if (new_file_size <= current_file_size)
+bool QuotaManager::reserve_bytes(uint64_t bytes) {
+    if (!enabled || bytes == 0)
         return true;
 
-    uint64_t delta = new_file_size - current_file_size;
-    uint64_t current_usage = used_bytes.load();
-
-    do {
-        uint64_t limit = quota_limit.load();
-        if (limit != 0 && current_usage + delta > limit)
-            return false;
-    } while (!used_bytes.compare_exchange_weak(current_usage, current_usage + delta));
-
+    uint64_t limit = quota_limit.load(std::memory_order_relaxed);
+    uint64_t prev = used_bytes.fetch_add(bytes, std::memory_order_relaxed);
+    if (limit != 0 && prev + bytes > limit) {
+        release_bytes(bytes);
+        return false;
+    }
     return true;
 }
 
-void QuotaManager::release(uint64_t current_file_size, uint64_t new_file_size) {
-    if (!enabled || new_file_size >= current_file_size)
+void QuotaManager::release_bytes(uint64_t bytes) {
+    if (!enabled || bytes == 0)
         return;
 
-    uint64_t delta = current_file_size - new_file_size;
-    uint64_t current_usage = used_bytes.load();
+    uint64_t current_usage = used_bytes.load(std::memory_order_relaxed);
     while (true) {
-        uint64_t next_usage = (delta > current_usage) ? 0 : (current_usage - delta);
-        if (used_bytes.compare_exchange_weak(current_usage, next_usage))
+        uint64_t next_usage = (bytes > current_usage) ? 0 : (current_usage - bytes);
+        if (used_bytes.compare_exchange_weak(current_usage, next_usage, std::memory_order_relaxed))
             break;
     }
+}
+
+bool QuotaManager::reserve(uint64_t current_file_size, uint64_t new_file_size) {
+    if (new_file_size <= current_file_size)
+        return true;
+    return reserve_bytes(new_file_size - current_file_size);
+}
+
+void QuotaManager::release(uint64_t current_file_size, uint64_t new_file_size) {
+    if (new_file_size >= current_file_size)
+        return;
+    release_bytes(current_file_size - new_file_size);
 }
 
 bool QuotaManager::check_available(uint64_t bytes) const {
     if (!enabled)
         return true;
-    uint64_t limit = quota_limit.load();
+    uint64_t limit = quota_limit.load(std::memory_order_relaxed);
     if (limit == 0)
         return true;
-    return used_bytes.load() + bytes <= limit;
+    return used_bytes.load(std::memory_order_relaxed) + bytes <= limit;
 }

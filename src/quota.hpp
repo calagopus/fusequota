@@ -13,10 +13,18 @@ class QuotaManager {
     bool reserve(uint64_t current_file_size, uint64_t new_file_size);
     void release(uint64_t current_file_size, uint64_t new_file_size);
 
+    bool reserve_bytes(uint64_t bytes);
+    void release_bytes(uint64_t bytes);
+
+    void force_add(uint64_t bytes) {
+        if (enabled && bytes)
+            used_bytes.fetch_add(bytes, std::memory_order_relaxed);
+    }
+
     bool check_available(uint64_t bytes) const;
 
     uint64_t get_usage() const {
-        return used_bytes.load();
+        return used_bytes.load(std::memory_order_relaxed);
     }
     void set_usage(uint64_t new_usage) {
         used_bytes.store(new_usage);
@@ -38,7 +46,7 @@ class QuotaManager {
     bool enabled{false};
     std::string source_dir;
     std::atomic<uint64_t> quota_limit{0};
-    std::atomic<uint64_t> used_bytes{0};
+    alignas(64) std::atomic<uint64_t> used_bytes{0};
 
     std::chrono::seconds rescan_interval{0};
     std::jthread scanner_thread;

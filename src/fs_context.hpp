@@ -1,13 +1,23 @@
 #pragma once
+#include <array>
 #include "common.hpp"
 #include "inode.hpp"
 #include "quota.hpp"
 #include "socket_server.hpp"
 
-struct Fs {
+struct InodeShard {
     std::mutex mutex;
     InodeMap inodes;
+};
+
+struct Fs {
+    static constexpr size_t inode_shard_count = 64;
+    std::array<InodeShard, inode_shard_count> inode_shards;
     Inode root;
+
+    InodeShard &shard_for(const SrcId &id) {
+        return inode_shards[std::hash<SrcId>{}(id) % inode_shard_count];
+    }
     double timeout{0.0};
 
     bool debug{false};
