@@ -6,6 +6,8 @@
 #include "fs_context.hpp"
 
 SocketServer::~SocketServer() {
+    stop();
+
     if (!socket_path.empty()) {
         unlink(socket_path.c_str());
     }
@@ -14,6 +16,13 @@ SocketServer::~SocketServer() {
 void SocketServer::start(const std::string &path) {
     socket_path = path;
     server_thread = std::jthread(std::bind_front(&SocketServer::run, this));
+}
+
+void SocketServer::stop() {
+    if (server_thread.joinable()) {
+        server_thread.request_stop();
+        server_thread.join();
+    }
 }
 
 bool SocketServer::handle_client(int client_fd) {

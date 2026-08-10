@@ -1030,7 +1030,7 @@ static void sfs_flock(fuse_req_t req, fuse_ino_t ino, fuse_file_info *fi, int op
 static void sfs_getxattr(fuse_req_t req, fuse_ino_t ino, const char *name, size_t size) {
     Inode &inode = get_inode(ino);
     char procname[64];
-    std::format_to_n(procname, sizeof(procname) - 1, "/proc/self/fd/{}", inode.fd);
+    *std::format_to_n(procname, sizeof(procname) - 1, "/proc/self/fd/{}", inode.fd).out = '\0';
 
     if (size) {
         std::vector<char> value(size);
@@ -1051,7 +1051,7 @@ static void sfs_getxattr(fuse_req_t req, fuse_ino_t ino, const char *name, size_
 static void sfs_listxattr(fuse_req_t req, fuse_ino_t ino, size_t size) {
     Inode &inode = get_inode(ino);
     char procname[64];
-    std::format_to_n(procname, sizeof(procname) - 1, "/proc/self/fd/{}", inode.fd);
+    *std::format_to_n(procname, sizeof(procname) - 1, "/proc/self/fd/{}", inode.fd).out = '\0';
 
     if (size) {
         std::vector<char> value(size);

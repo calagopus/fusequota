@@ -9,6 +9,7 @@ class SocketServer {
     ~SocketServer();
 
     void start(const std::string &path);
+    void stop();
 
   private:
     void run(std::stop_token st);

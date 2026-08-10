@@ -185,6 +185,9 @@ int main(int argc, char *argv[]) {
 
     debug_print("Filesystem unmounting");
 
+    fs.socket_server.stop();
+    fs.se = nullptr;
+
     fuse_session_unmount(se);
     fuse_remove_signal_handlers(se);
 
