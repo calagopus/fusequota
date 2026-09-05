@@ -208,7 +208,9 @@ static int do_lookup(fuse_ino_t parent, const char *name, fuse_entry_param *e) {
 static void sfs_init(void *userdata, fuse_conn_info *conn) {
     (void)userdata;
 
-    if (!fuse_set_feature_flag(conn, FUSE_CAP_PASSTHROUGH))
+    if (fs.quota.is_enabled())
+        fs.passthrough = false;
+    if (fs.passthrough && !fuse_set_feature_flag(conn, FUSE_CAP_PASSTHROUGH))
         fs.passthrough = false;
 
     if (fs.timeout)
@@ -719,19 +721,24 @@ static void do_passthrough_open(fuse_req_t req, fuse_ino_t ino, int fd, fuse_fil
 
     debug_print("is_write: {}, flags: {}", is_write, fi->flags);
 
+    if (is_write && fs.quota.is_enabled()) {
+        debug_print("not handling fuse_passthrough due to writing.");
+        return;
+    }
+
     Inode &inode = get_inode(ino);
+    std::lock_guard<std::mutex> g{inode.m};
     if (inode.backing_id) {
         fi->backing_id = inode.backing_id;
         debug_print("reusing existing backing_id for inode {}", ino);
-    } else if (is_write && fs.quota.is_enabled()) {
-        debug_print("not handling fuse_passthrough due to writing.");
     } else if (!(inode.backing_id = fuse_passthrough_open(req, fd))) {
         debug_print("fuse_passthrough_open failed for inode {}, disabling rw passthrough.", ino);
     } else {
         fi->backing_id = inode.backing_id;
         debug_print("assigned new backing_id for inode {}", ino);
     }
-    fi->keep_cache = false;
+    if (fi->backing_id)
+        fi->keep_cache = false;
 }
 
 static void sfs_create_open_flags(fuse_file_info *fi) {
