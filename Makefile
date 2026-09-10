@@ -2,7 +2,7 @@ BUILD_DIR := build
 INSTALL_DIR := /usr/local/bin
 TARGET_NAME := fusequota
 
-.PHONY: all musl clean install libfuse libfuse-patches help
+.PHONY: all musl clean install libfuse libfuse-patches test format help
 
 all: libfuse $(BUILD_DIR)/Makefile
 	@echo "--- Building Project ---"
@@ -36,6 +36,12 @@ $(BUILD_DIR)/Makefile:
 	mkdir -p $(BUILD_DIR)
 	cd $(BUILD_DIR) && cmake ..
 
+test: libfuse
+	@echo "--- Building and Running Tests ---"
+	cmake -S . -B $(BUILD_DIR) -DFUSEQUOTA_BUILD_TESTS=ON
+	cmake --build $(BUILD_DIR)
+	ctest --test-dir $(BUILD_DIR) --output-on-failure
+
 install: all
 	@echo "--- Installing Binary ---"
 	sudo install -m 755 $(BUILD_DIR)/$(TARGET_NAME) $(INSTALL_DIR)
@@ -45,7 +51,7 @@ clean:
 	rm -rf $(BUILD_DIR)
 	rm -rf external/libfuse/build
 
-FORMAT_SOURCES := $(shell find src -name "*.cpp" -o -name "*.hpp")
+FORMAT_SOURCES := $(shell find src tests -name "*.cpp" -o -name "*.hpp")
 
 format:
 	@echo "--- Formatting Code ---"
@@ -55,6 +61,7 @@ help:
 	@echo "Usage:"
 	@echo "  make         - Build libfuse and the main project"
 	@echo "  make install - Build and install the binary to $(INSTALL_DIR)"
+	@echo "  make test    - Build and run the unit and integration tests"
 	@echo "  make clean   - Remove build directories"
 	@echo "  make musl    - Build a static binary using musl (via Docker)"
 	@echo "  make format  - Format source code using clang-format"

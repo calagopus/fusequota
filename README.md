@@ -17,7 +17,7 @@ FuseQuota is a small program that uses FUSE to mount a virtual filesystem which 
 ## Requirements
 
 - C++ compiler with C++23 support
-- CMake 3.20 or higher
+- CMake 3.24 or higher
 - Ninja build system
 
 ## Building
@@ -25,3 +25,19 @@ FuseQuota is a small program that uses FUSE to mount a virtual filesystem which 
 ```bash
 make
 ```
+
+## Testing
+
+The test suite uses [GoogleTest](https://github.com/google/googletest). It is
+picked up from the system when `libgtest-dev` (or equivalent) is installed and
+downloaded by CMake otherwise.
+
+```bash
+make test
+```
+
+Unit tests cover the quota accounting and the control socket protocol.
+Integration tests mount a real filesystem with the built binary and therefore
+need access to `/dev/fuse`; they are skipped when it is unavailable. Set
+`FUSEQUOTA_REQUIRE_FUSE=1` to turn that skip into a failure, or run only one
+half with `ctest --test-dir build -L unit` / `-L integration`.

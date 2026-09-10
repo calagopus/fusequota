@@ -1,0 +1,45 @@
+name: Lint
+
+on:
+  pull_request:
+  push:
+    branches:
+      - "*"
+
+jobs:
+  lint:
+    name: Lint
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+
+    steps:
+      - name: Checkout sources
+        uses: actions/checkout@v6
+        with:
+          submodules: recursive
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            g++-14 cmake meson ninja-build pkg-config fuse3 liburing-dev libgtest-dev
+          pip install --user "clang-format~=21.1"
+
+      - name: Run clang-format
+        run: clang-format --dry-run --Werror $(find src tests -name "*.cpp" -o -name "*.hpp")
+
+      - name: Build libfuse
+        run: make libfuse
+
+      - name: Configure
+        run: cmake -S . -B build -DCMAKE_BUILD_TYPE=Release -DFUSEQUOTA_BUILD_TESTS=ON
+        env:
+          CC: gcc-14
+          CXX: g++-14
+
+      - name: Build
+        run: cmake --build build
+
+      - name: Run tests
+        run: sudo env PATH="$PATH" FUSEQUOTA_REQUIRE_FUSE=1 ctest --test-dir build --output-on-failure

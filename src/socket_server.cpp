@@ -95,6 +95,7 @@ bool SocketServer::handle_client(int client_fd) {
         }
     } else if (cmd == "do end") {
         if (fs.se) {
+            fuse_session_exit(fs.se);
             fuse_session_unmount(fs.se);
         }
 
