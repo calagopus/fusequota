@@ -11,9 +11,11 @@ int main(int argc, char *argv[]) {
 
     opt_parser.add_options()("debug", "Enable filesystem debug messages")(
         "debug-fuse", "Enable libfuse debug messages")("foreground", "Run in foreground")(
-        "help", "Print help")("nocache", "Disable attribute all caching")(
-        "nosplice", "Do not use splice(2)")("nopassthrough", "Disable passthrough")(
-        "single", "Run single-threaded")("o", "Mount options", cxxopts::value(mount_options))(
+        "help", "Print help")("nocache", "Disable attribute all caching")("nosplice",
+                                                                          "Do not use splice(2)")(
+        "noflush", "Do not forward close(2) flushes to the source filesystem")(
+        "nopassthrough", "Disable passthrough")("single", "Run single-threaded")(
+        "o", "Mount options", cxxopts::value(mount_options))(
         "num-threads", "Number of threads", cxxopts::value<int>()->default_value("-1"))(
         "clone-fd", "Separate fuse device fd per thread")("direct-io", "Enable internal direct-io")(
         "quota", "Global quota limit in bytes", cxxopts::value<uint64_t>())(
@@ -44,6 +46,7 @@ int main(int argc, char *argv[]) {
     fs.debug_fuse = options.count("debug-fuse");
     fs.foreground = options.count("foreground") || fs.debug || fs.debug_fuse;
     fs.nosplice = options.count("nosplice");
+    fs.noflush = options.count("noflush");
     fs.passthrough = options.count("nopassthrough") == 0;
     fs.num_threads = options["num-threads"].as<int>();
     fs.clone_fd = options.count("clone-fd");

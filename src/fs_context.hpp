@@ -29,6 +29,7 @@ struct Fs {
     dev_t src_dev{0};
 
     bool nosplice{false};
+    bool noflush{false};
     bool nocache{false};
     int num_threads{-1};
     bool clone_fd{false};
@@ -36,6 +37,7 @@ struct Fs {
     std::string fuse_mount_options;
     bool direct_io{false};
     bool passthrough{true};
+    bool killpriv{false};
 
     bool force_uid_enabled{false};
     uid_t force_uid{0};

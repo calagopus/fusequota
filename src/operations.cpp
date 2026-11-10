@@ -116,6 +116,30 @@ static void enforce_ownership(int dirfd, const char *name, int fd = -1) {
     }
 }
 
+// With FUSE_CAP_HANDLE_KILLPRIV_V2 the kernel no longer clears suid/sgid on
+// write, truncate and chown, nor refreshes its cached mode afterwards.
+static void kill_suidgid(fuse_ino_t ino) {
+    Inode &inode = get_inode(ino);
+    struct stat st;
+    if (fstatat(inode.fd, "", &st, AT_EMPTY_PATH | AT_SYMLINK_NOFOLLOW) == -1 ||
+        !S_ISREG(st.st_mode))
+        return;
+
+    mode_t kill = st.st_mode & S_ISUID;
+    if ((st.st_mode & (S_ISGID | S_IXGRP)) == (S_ISGID | S_IXGRP))
+        kill |= S_ISGID;
+    if (!kill)
+        return;
+
+    char procname[64];
+    *std::format_to_n(procname, sizeof(procname) - 1, "/proc/self/fd/{}", inode.fd).out = '\0';
+    if (chmod(procname, (st.st_mode & 07777) & ~kill) == -1) {
+        error_print("WARNING: Failed to clear suid/sgid on inode {}: {}", inode.src_ino, errno);
+        return;
+    }
+    fuse_lowlevel_notify_inval_inode(fs.se, ino, -1, 0);
+}
+
 static void forget_one(fuse_ino_t ino, uint64_t n) {
     Inode &inode = get_inode(ino);
     std::unique_lock<std::mutex> l{inode.m};
@@ -216,6 +240,11 @@ static void sfs_init(void *userdata, fuse_conn_info *conn) {
     if (fs.timeout)
         fuse_set_feature_flag(conn, FUSE_CAP_WRITEBACK_CACHE);
 
+    // Saves a GETXATTR security.capability round trip per write(2). Passthrough
+    // writes bypass the daemon, so nothing could clear suid/sgid for them.
+    if (!fs.passthrough)
+        fs.killpriv = fuse_set_feature_flag(conn, FUSE_CAP_HANDLE_KILLPRIV_V2);
+
     fuse_set_feature_flag(conn, FUSE_CAP_FLOCK_LOCKS);
 
     if (fs.nosplice) {
@@ -223,8 +252,10 @@ static void sfs_init(void *userdata, fuse_conn_info *conn) {
         fuse_unset_feature_flag(conn, FUSE_CAP_SPLICE_WRITE);
         fuse_unset_feature_flag(conn, FUSE_CAP_SPLICE_MOVE);
     } else {
+        // Splicing replies out avoids a copy on reads; splicing requests in
+        // costs an extra pipe round trip per request and is slower than read(2).
         fuse_set_feature_flag(conn, FUSE_CAP_SPLICE_WRITE);
-        fuse_set_feature_flag(conn, FUSE_CAP_SPLICE_READ);
+        fuse_unset_feature_flag(conn, FUSE_CAP_SPLICE_READ);
         fuse_set_feature_flag(conn, FUSE_CAP_SPLICE_MOVE);
     }
 
@@ -268,7 +299,7 @@ static void sfs_setattr(fuse_req_t req, fuse_ino_t ino, struct stat *attr, int v
         uid_t u = (valid & FUSE_SET_ATTR_UID) ? attr->st_uid : static_cast<uid_t>(-1);
         gid_t g = (valid & FUSE_SET_ATTR_GID) ? attr->st_gid : static_cast<gid_t>(-1);
 
-        res = with_fd_path(ifd, [u, g](const char *procname) { return lchown(procname, u, g); });
+        res = fchownat(ifd, "", u, g, AT_EMPTY_PATH | AT_SYMLINK_NOFOLLOW);
         if (res == -1) {
             fuse_reply_err(req, errno);
             return;
@@ -341,6 +372,9 @@ static void sfs_setattr(fuse_req_t req, fuse_ino_t ino, struct stat *attr, int v
             return;
         }
     }
+
+    if (fs.killpriv && (valid & FUSE_SET_ATTR_KILL_SUID))
+        kill_suidgid(ino);
 
     return sfs_getattr(req, ino, fi);
 }
@@ -761,19 +795,17 @@ static void sfs_create(fuse_req_t req, fuse_ino_t parent, const char *name, mode
     uint64_t old_file_size = 0;
     bool truncating_existing = false;
 
-    if (fs.quota.is_enabled()) {
-        if (fi->flags & O_TRUNC) {
-            struct stat st;
-            if (fstatat(inode_p.fd, name, &st, AT_SYMLINK_NOFOLLOW) == 0 && S_ISREG(st.st_mode)) {
-                old_file_size = st.st_blocks * 512;
-                truncating_existing = true;
-            }
+    if ((fi->flags & O_TRUNC) && (fs.quota.is_enabled() || fs.killpriv)) {
+        struct stat st;
+        if (fstatat(inode_p.fd, name, &st, AT_SYMLINK_NOFOLLOW) == 0 && S_ISREG(st.st_mode)) {
+            old_file_size = st.st_blocks * 512;
+            truncating_existing = true;
         }
+    }
 
-        if (!truncating_existing && !fs.quota.check_available(0)) {
-            fuse_reply_err(req, ENOSPC);
-            return;
-        }
+    if (fs.quota.is_enabled() && !truncating_existing && !fs.quota.check_available(0)) {
+        fuse_reply_err(req, ENOSPC);
+        return;
     }
 
     int fd = openat(inode_p.fd, name, (fi->flags | O_CREAT) & ~O_NOFOLLOW, mode);
@@ -792,6 +824,9 @@ static void sfs_create(fuse_req_t req, fuse_ino_t parent, const char *name, mode
         fuse_reply_err(req, err);
         return;
     }
+
+    if (fs.killpriv && truncating_existing)
+        kill_suidgid(e.ino);
 
     Inode &inode = get_inode(e.ino);
     std::lock_guard<std::mutex> g{inode.m};
@@ -822,15 +857,17 @@ static void sfs_open(fuse_req_t req, fuse_ino_t ino, fuse_file_info *fi) {
     if (fs.timeout && fi->flags & O_APPEND)
         fi->flags &= ~O_APPEND;
 
-    int fd = with_fd_path(inode.fd,
-                          [fi](const char *buf) { return open(buf, fi->flags & ~O_NOFOLLOW); });
+    char procname[64];
+    *std::format_to_n(procname, sizeof(procname) - 1, "/proc/self/fd/{}", inode.fd).out = '\0';
+    int fd = open(procname, fi->flags & ~O_NOFOLLOW);
 
     if (fd == -1) {
         fuse_reply_err(req, errno);
         return;
     }
 
-    enforce_ownership(-1, nullptr, fd);
+    if (fs.killpriv && (fi->flags & O_TRUNC))
+        kill_suidgid(ino);
 
     {
         std::lock_guard<std::mutex> g{inode.m};
@@ -965,6 +1002,9 @@ static void sfs_write_buf(fuse_req_t req, fuse_ino_t ino, fuse_bufvec *in_buf, o
                 quota_ungrow_tracked(inode, write_end, std::max(reserved_from, actual_end));
             }
         }
+        // A write that needs the kill is never sent as page-cache writeback
+        if (fs.killpriv && !fi->writepage)
+            kill_suidgid(ino);
         fuse_reply_write(req, (size_t)res);
     }
 }
@@ -1024,6 +1064,8 @@ static void sfs_fallocate(fuse_req_t req, fuse_ino_t ino, int mode, off_t offset
         }
         fuse_reply_err(req, err);
     } else {
+        if (fs.killpriv)
+            kill_suidgid(ino);
         fuse_reply_err(req, 0);
     }
 }
@@ -1114,7 +1156,8 @@ void assign_operations(fuse_lowlevel_ops &sfs_oper) {
     sfs_oper.create = sfs_create;
     sfs_oper.open = sfs_open;
     sfs_oper.release = sfs_release;
-    sfs_oper.flush = sfs_flush;
+    if (!fs.noflush)
+        sfs_oper.flush = sfs_flush;
     sfs_oper.fsync = sfs_fsync;
     sfs_oper.read = sfs_read;
     sfs_oper.write_buf = sfs_write_buf;

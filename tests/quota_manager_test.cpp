@@ -1,8 +1,10 @@
 #include <chrono>
 #include <fcntl.h>
+#include <grp.h>
 #include <gtest/gtest.h>
 #include <memory>
 #include <sys/stat.h>
+#include <sys/wait.h>
 #include <thread>
 #include <unistd.h>
 #include "quota.hpp"
@@ -219,6 +221,89 @@ TEST(QuotaManagerScan, BackgroundRescanCorrectsDriftInBothDirections) {
     EXPECT_TRUE(
         eventually([&] { return quota.get_usage() == expected; }, std::chrono::milliseconds(5000)))
         << "usage stuck at " << quota.get_usage();
+}
+
+TEST(QuotaManagerScan, RecursesDeeplyNestedDirectories) {
+    TempDir dir;
+    uint64_t expected = 0;
+    auto cur = dir.path();
+    for (int i = 0; i < 64; ++i) {
+        cur /= "d";
+        std::filesystem::create_directory(cur);
+        expected += blocks_of(cur);
+    }
+    write_file(cur / "leaf", 128 * KiB);
+    expected += blocks_of(cur / "leaf");
+
+    QuotaManager quota;
+    quota.init(dir.path().string(), 100 * MiB, 0);
+    EXPECT_EQ(quota.get_usage(), expected);
+}
+
+TEST(QuotaManagerScan, DoesNotFollowSymlinks) {
+    TempDir dir;
+    TempDir outside;
+    std::filesystem::create_directory(outside.path() / "sub");
+    write_file(outside.path() / "sub" / "big", 1 * MiB);
+    write_file(outside.path() / "file", 1 * MiB);
+    std::filesystem::create_directory_symlink(outside.path() / "sub", dir.path() / "dirlink");
+    std::filesystem::create_symlink(outside.path() / "file", dir.path() / "filelink");
+
+    QuotaManager quota;
+    quota.init(dir.path().string(), 100 * MiB, 0);
+    EXPECT_EQ(quota.get_usage(),
+              blocks_of(dir.path() / "dirlink") + blocks_of(dir.path() / "filelink"));
+}
+
+TEST(QuotaManagerScan, SparseFilesCountAllocatedBlocksOnly) {
+    TempDir dir;
+    auto file = dir.path() / "sparse";
+    int fd = open(file.c_str(), O_WRONLY | O_CREAT, 0644);
+    ASSERT_GE(fd, 0);
+    ASSERT_EQ(ftruncate(fd, static_cast<off_t>(64 * MiB)), 0);
+    ASSERT_EQ(pwrite(fd, "x", 1, static_cast<off_t>(32 * MiB)), 1);
+    ASSERT_EQ(fsync(fd), 0);
+    close(fd);
+    ASSERT_LT(blocks_of(file), 1 * MiB);
+
+    QuotaManager quota;
+    quota.init(dir.path().string(), 1 * MiB, 0);
+    EXPECT_EQ(quota.get_usage(), blocks_of(file));
+}
+
+TEST(QuotaManagerScan, FailedRescanLeavesUsageUnchanged) {
+    constexpr uid_t kNobody = 65534;
+    TempDir dir;
+    auto sub = dir.path() / "sub";
+    std::filesystem::create_directory(sub);
+    write_file(dir.path() / "top", 256 * KiB);
+    write_file(sub / "inner", 256 * KiB);
+    for (const auto &p : {dir.path(), sub, dir.path() / "top", sub / "inner"})
+        ASSERT_EQ(lchown(p.c_str(), kNobody, kNobody), 0);
+
+    pid_t pid = fork();
+    ASSERT_GE(pid, 0);
+    if (pid == 0) {
+        if (setgroups(0, nullptr) != 0 || setgid(kNobody) != 0 || setuid(kNobody) != 0)
+            _exit(10);
+        QuotaManager quota;
+        quota.init(dir.path().string(), 100 * MiB, 1);
+        if (quota.get_usage() < 512 * KiB)
+            _exit(11);
+        if (chmod(sub.c_str(), 0) != 0)
+            _exit(12);
+        uint64_t sentinel = 77 * MiB;
+        quota.set_usage(sentinel);
+        std::this_thread::sleep_for(std::chrono::milliseconds(3500));
+        uint64_t after = quota.get_usage();
+        chmod(sub.c_str(), 0755);
+        _exit(after == sentinel ? 0 : 13);
+    }
+    int status = 0;
+    ASSERT_EQ(waitpid(pid, &status, 0), pid);
+    chmod(sub.c_str(), 0755);
+    ASSERT_TRUE(WIFEXITED(status));
+    EXPECT_EQ(WEXITSTATUS(status), 0);
 }
 
 TEST(QuotaManagerScan, DestructorStopsScannerPromptly) {

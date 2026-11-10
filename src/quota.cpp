@@ -1,6 +1,9 @@
 #include "quota.hpp"
 #include <condition_variable>
+#include <fcntl.h>
 #include <mutex>
+#include <sys/stat.h>
+#include <system_error>
 #include <unordered_set>
 #include "inode.hpp"
 
@@ -22,20 +25,52 @@ void QuotaManager::init(const std::string &source_path, uint64_t limit, int resc
     }
 }
 
-void QuotaManager::calculate_usage(std::stop_token st) {
-    namespace fsys = std::filesystem;
+namespace {
 
+struct UsageScan {
+    std::stop_token st;
     std::unordered_set<SrcId> seen_inodes;
     uint64_t total = 0;
 
-    try {
-        for (const auto &entry : fsys::recursive_directory_iterator(source_dir)) {
-            if (st.stop_requested()) {
-                return;
+    bool scan(int parent_fd, const char *name) {
+        int fd = openat(parent_fd, name, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);
+        if (fd == -1) {
+            // Entries can vanish between readdir and open while the tree is live
+            if (parent_fd != AT_FDCWD && (errno == ENOENT || errno == ENOTDIR || errno == ELOOP))
+                return true;
+            throw std::system_error(errno, std::generic_category(), name);
+        }
+
+        DIR *dp = fdopendir(fd);
+        if (!dp) {
+            int saved = errno;
+            close(fd);
+            throw std::system_error(saved, std::generic_category(), name);
+        }
+        struct DirCloser {
+            DIR *dp;
+            ~DirCloser() {
+                closedir(dp);
             }
+        } closer{dp};
+
+        while (true) {
+            if (st.stop_requested())
+                return false;
+
+            errno = 0;
+            struct dirent *entry = readdir(dp);
+            if (!entry) {
+                if (errno)
+                    throw std::system_error(errno, std::generic_category(), name);
+                return true;
+            }
+            std::string_view entry_name{entry->d_name};
+            if (entry_name == "." || entry_name == "..")
+                continue;
 
             struct stat file_stat;
-            if (lstat(entry.path().c_str(), &file_stat) != 0)
+            if (fstatat(fd, entry->d_name, &file_stat, AT_SYMLINK_NOFOLLOW) != 0)
                 continue;
 
             if (file_stat.st_nlink > 1 && !S_ISDIR(file_stat.st_mode)) {
@@ -48,7 +83,21 @@ void QuotaManager::calculate_usage(std::stop_token st) {
                 S_ISLNK(file_stat.st_mode)) {
                 total += file_stat.st_blocks * 512;
             }
+
+            if (S_ISDIR(file_stat.st_mode) && !scan(fd, entry->d_name))
+                return false;
         }
+    }
+};
+
+} // namespace
+
+void QuotaManager::calculate_usage(std::stop_token st) {
+    try {
+        UsageScan usage_scan{.st = st};
+        if (!usage_scan.scan(AT_FDCWD, source_dir.c_str()))
+            return;
+        uint64_t total = usage_scan.total;
 
         uint64_t tracked = used_bytes.load();
         if (total != tracked) {
